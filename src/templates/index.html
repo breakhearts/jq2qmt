@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>策略持仓查看</title>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .strategy-section {
+            margin-bottom: 30px;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .strategy-name {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .update-time {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f5f5f5;
+            font-weight: bold;
+        }
+        .refresh-btn {
+            margin-bottom: 20px;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .refresh-btn:hover {
+            background-color: #45a049;
+        }
+        .total-positions {
+            margin-bottom: 30px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+        .section-title {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #eee;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        .error {
+            color: #dc3545;
+            padding: 10px;
+            background-color: #f8d7da;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>策略持仓信息</h1>
+    <button class="refresh-btn" onclick="refreshData()">刷新数据</button>
+    
+    <div class="total-positions">
+        <h2 class="section-title">总持仓</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>股票代码</th>
+                    <th>总持仓</th>
+                    <th>平均成本</th>
+                </tr>
+            </thead>
+            <tbody id="total-positions-body"></tbody>
+        </table>
+    </div>
+    
+    <h2 class="section-title">策略明细</h2>
+    <div id="positions-container"></div>
+
+    <script>
+        async function fetchData() {
+            try {
+                const [totalResponse, allResponse] = await Promise.all([
+                    fetch('/api/v1/positions/total'),
+                    fetch('/api/v1/positions/all')
+                ]);
+                
+                const totalData = await totalResponse.json();
+                const allData = await allResponse.json();
+                
+                return {
+                    totalPositions: totalData.positions || [],
+                    strategies: allData.strategies || []
+                };
+            } catch (error) {
+                console.error('获取数据失败:', error);
+                throw error;
+            }
+        }
+
+        function renderTotalPositions(positions) {
+            const tbody = document.getElementById('total-positions-body');
+            tbody.innerHTML = positions.map(p => `
+                <tr>
+                    <td>${p.code}</td>
+                    <td>${p.total_volume}</td>
+                    <td>${p.avg_cost.toFixed(2)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderStrategies(strategies) {
+            return strategies.map(strategy => `
+                <div class="strategy-section">
+                    <div class="strategy-name">${strategy.strategy_name}</div>
+                    <div class="update-time">更新时间：${strategy.update_time}</div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>股票代码</th>
+                                <th>持仓数量</th>
+                                <th>成本</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${strategy.positions.map(p => `
+                                <tr>
+                                    <td>${p.code}</td>
+                                    <td>${p.volume}</td>
+                                    <td>${p.cost.toFixed(2)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `).join('');
+        }
+
+        async function refreshData() {
+            const container = document.getElementById('positions-container');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+
+            try {
+                const data = await fetchData();
+                renderTotalPositions(data.totalPositions);
+                container.innerHTML = renderStrategies(data.strategies);
+            } catch (error) {
+                container.innerHTML = '<div class="error">加载数据失败，请稍后重试</div>';
+            }
+        }
+
+        // 页面加载完成后自动刷新数据
+        document.addEventListener('DOMContentLoaded', refreshData);
+
+        // 每60秒自动刷新一次数据
+        setInterval(refreshData, 60000);
+    </script>
+</body>
+</html>
