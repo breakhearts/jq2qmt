@@ -75,11 +75,25 @@
             border-radius: 4px;
             margin-bottom: 20px;
         }
+        .negative-volume {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .positive-volume {
+            color: #28a745;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
-    <h1>策略持仓信息</h1>
-    <button class="refresh-btn" onclick="refreshData()">刷新数据</button>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h1>策略持仓信息</h1>
+        <div>
+            <a href="/adjustment" style="margin-right: 15px; color: #007bff; text-decoration: none; font-size: 16px;">持仓调整 →</a>
+            <a href="/password" style="margin-right: 15px; color: #007bff; text-decoration: none; font-size: 16px;">密码管理 →</a>
+            <button class="refresh-btn" onclick="refreshData()">刷新数据</button>
+        </div>
+    </div>
     
     <div class="total-positions">
         <h2 class="section-title">总持仓</h2>
@@ -87,6 +101,7 @@
             <thead>
                 <tr>
                     <th>股票代码</th>
+                    <th>股票名称</th>
                     <th>总持仓</th>
                     <th>平均成本</th>
                 </tr>
@@ -124,7 +139,10 @@
             tbody.innerHTML = positions.map(p => `
                 <tr>
                     <td>${p.code}</td>
-                    <td>${p.total_volume}</td>
+                    <td>${p.name || p.code}</td>
+                    <td class="${p.total_volume >= 0 ? 'positive-volume' : 'negative-volume'}">
+                        ${p.total_volume >= 0 ? '+' : ''}${p.total_volume}
+                    </td>
                     <td>${p.avg_cost.toFixed(2)}</td>
                 </tr>
             `).join('');
@@ -139,6 +157,7 @@
                         <thead>
                             <tr>
                                 <th>股票代码</th>
+                                <th>股票名称</th>
                                 <th>持仓数量</th>
                                 <th>成本</th>
                             </tr>
@@ -147,7 +166,10 @@
                             ${strategy.positions.map(p => `
                                 <tr>
                                     <td>${p.code}</td>
-                                    <td>${p.volume}</td>
+                                    <td>${p.name || p.code}</td>
+                                    <td class="${p.volume >= 0 ? 'positive-volume' : 'negative-volume'}">
+                                        ${p.volume >= 0 ? '+' : ''}${p.volume}
+                                    </td>
                                     <td>${p.cost.toFixed(2)}</td>
                                 </tr>
                             `).join('')}
