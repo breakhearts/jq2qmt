@@ -36,14 +36,6 @@ class ProjectInitializer:
     def check_prerequisites(self):
         """检查前置条件"""
         print("[1/5] 检查前置条件...")
-        
-        # 检查 OpenSSL
-        try:
-            subprocess.run(['openssl', 'version'], capture_output=True, check=True)
-            print("✓ OpenSSL 已安装")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print("✗ 错误: 未找到 OpenSSL，请先安装 OpenSSL")
-            return False
             
         # 检查 Python 版本
         if sys.version_info < (3, 6):
