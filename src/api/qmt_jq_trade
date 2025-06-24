@@ -13,7 +13,7 @@ class WaitngOrderStatus(Enum):
     ERROR = "ERROR"                 # 其他错误
 
 
-API_URL = "http://your_server_url:port"  # 此处替换成你的服务器IP地址和端口(如果不是80端口)
+API_URL = "http://your_server_url:port"  # 服务器API地址（自动配置）
 
 class G():
     def __init__(self):

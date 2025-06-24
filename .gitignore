@@ -32,12 +32,12 @@ htmlcov/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-src/config.py
-
 # Key files
 *.pem
 *.key
 *.crt
 quant_id_rsa*
 
-api/jq_config.py
+src/config.py
+src/api/jq_config.py
+src/api/qmt_jq_trade.py
