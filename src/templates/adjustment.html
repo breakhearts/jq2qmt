@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>策略持仓调整</title>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #eee;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        .btn-success {
+            background-color: #28a745;
+            color: white;
+        }
+        .btn-danger {
+            background-color: #dc3545;
+            color: white;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        .btn:hover {
+            opacity: 0.8;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: bold;
+            position: sticky;
+            top: 0;
+        }
+        .input-field {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        .modal-content {
+            background-color: white;
+            margin: 10% auto;
+            padding: 20px;
+            border-radius: 8px;
+            width: 500px;
+            max-width: 90%;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .close {
+            font-size: 24px;
+            cursor: pointer;
+            color: #999;
+        }
+        .close:hover {
+            color: #333;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .alert {
+            padding: 12px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .alert-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .alert-warning {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .negative-volume {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .positive-volume {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            color: #007bff;
+            text-decoration: none;
+            margin-right: 15px;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav-links">
+            <a href="/">← 返回持仓查看</a>
+        </div>
+        
+        <div class="header">
+            <h1>策略持仓调整</h1>
+            <div>
+                <button class="btn btn-primary" onclick="openAddModal()">添加调整</button>
+                <button class="btn btn-success" onclick="saveAdjustments()">保存调整</button>
+                <button class="btn btn-secondary" onclick="loadAdjustments()">刷新数据</button>
+                <a href="/password" class="btn btn-secondary">密码管理</a>
+            </div>
+        </div>
+        
+        <div id="alert-container"></div>
+        
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>股票代码</th>
+                        <th>股票名称</th>
+                        <th>调整数量</th>
+                        <th>调整成本</th>
+                        <th>备注</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="adjustments-table">
+                    <!-- 动态生成的调整记录 -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- 添加/编辑调整的模态框 -->
+    <div id="adjustmentModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">添加持仓调整</h3>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <form id="adjustmentForm">
+                <div class="form-group">
+                    <label for="stock-code">股票代码:</label>
+                    <input type="text" id="stock-code" class="input-field" placeholder="如: 000001.XSHE" required>
+                </div>
+                <div class="form-group">
+                    <label for="stock-name">股票名称:</label>
+                    <input type="text" id="stock-name" class="input-field" placeholder="如: 平安银行">
+                </div>
+                <div class="form-group">
+                    <label for="volume">调整数量:</label>
+                    <input type="number" id="volume" class="input-field" placeholder="正数为增仓，负数为减仓" step="1" required>
+                    <small style="color: #666;">正数表示增仓，负数表示减仓</small>
+                </div>
+                <div class="form-group">
+                    <label for="cost">调整成本:</label>
+                    <input type="number" id="cost" class="input-field" placeholder="调整的成本价" step="0.01" required>
+                </div>
+                <div class="form-group">
+                    <label for="remark">备注:</label>
+                    <input type="text" id="remark" class="input-field" placeholder="可选的备注信息">
+                </div>
+                <div style="text-align: right; margin-top: 20px;">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">确定</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        let adjustments = [];
+        let editingIndex = -1;
+        
+        // 页面加载时获取现有调整数据
+        document.addEventListener('DOMContentLoaded', loadAdjustments);
+        
+        async function loadAdjustments() {
+            try {
+                const response = await fetch('/api/v1/positions/strategy/ADJUSTMENT_MAIN');
+                if (response.ok) {
+                    const data = await response.json();
+                    adjustments = data.positions || [];
+                } else {
+                    adjustments = [];
+                }
+                renderAdjustments();
+            } catch (error) {
+                console.error('加载调整数据失败:', error);
+                showAlert('加载调整数据失败', 'danger');
+            }
+        }
+        
+        function renderAdjustments() {
+            const tbody = document.getElementById('adjustments-table');
+            if (adjustments.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">暂无调整记录</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = adjustments.map((adj, index) => `
+                <tr>
+                    <td>${adj.code}</td>
+                    <td>${adj.name || adj.code}</td>
+                    <td class="${adj.volume >= 0 ? 'positive-volume' : 'negative-volume'}">
+                        ${adj.volume >= 0 ? '+' : ''}${adj.volume}
+                    </td>
+                    <td>${adj.cost.toFixed(2)}</td>
+                    <td>${adj.remark || '-'}</td>
+                    <td>
+                        <button class="btn btn-primary" style="padding: 5px 10px; font-size: 12px;" onclick="editAdjustment(${index})">编辑</button>
+                        <button class="btn btn-danger" style="padding: 5px 10px; font-size: 12px;" onclick="deleteAdjustment(${index})">删除</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        function openAddModal() {
+            editingIndex = -1;
+            document.getElementById('modal-title').textContent = '添加持仓调整';
+            document.getElementById('adjustmentForm').reset();
+            document.getElementById('adjustmentModal').style.display = 'block';
+        }
+        
+        function editAdjustment(index) {
+            editingIndex = index;
+            const adj = adjustments[index];
+            document.getElementById('modal-title').textContent = '编辑持仓调整';
+            document.getElementById('stock-code').value = adj.code;
+            document.getElementById('stock-name').value = adj.name || '';
+            document.getElementById('volume').value = adj.volume;
+            document.getElementById('cost').value = adj.cost;
+            document.getElementById('remark').value = adj.remark || '';
+            document.getElementById('adjustmentModal').style.display = 'block';
+        }
+        
+        function deleteAdjustment(index) {
+            if (confirm('确定要删除这条调整记录吗？')) {
+                adjustments.splice(index, 1);
+                renderAdjustments();
+            }
+        }
+        
+        function closeModal() {
+            document.getElementById('adjustmentModal').style.display = 'none';
+        }
+        
+        // 表单提交处理
+        document.getElementById('adjustmentForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const code = document.getElementById('stock-code').value.trim();
+            const name = document.getElementById('stock-name').value.trim();
+            const volume = parseFloat(document.getElementById('volume').value);
+            const cost = parseFloat(document.getElementById('cost').value);
+            const remark = document.getElementById('remark').value.trim();
+            
+            if (!code || isNaN(volume) || isNaN(cost)) {
+                showAlert('请填写完整的必填信息', 'danger');
+                return;
+            }
+            
+            const adjustment = {
+                code: code,
+                name: name || code,
+                volume: volume,
+                cost: cost,
+                remark: remark
+            };
+            
+            if (editingIndex >= 0) {
+                adjustments[editingIndex] = adjustment;
+            } else {
+                adjustments.push(adjustment);
+            }
+            
+            renderAdjustments();
+            closeModal();
+            showAlert('调整记录已更新', 'success');
+        });
+        
+        async function saveAdjustments() {
+            // 获取内部密码
+            const password = prompt('请输入内部密码:', 'admin123');
+            if (!password) {
+                showAlert('保存已取消', 'warning');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/v1/positions/update/internal', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Internal-Password': password
+                    },
+                    body: JSON.stringify({
+                        strategy_name: 'ADJUSTMENT_MAIN',
+                        positions: adjustments
+                    })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    showAlert('调整数据保存成功', 'success');
+                } else {
+                    const error = await response.json();
+                    if (response.status === 401) {
+                        showAlert('密码验证失败，请检查密码是否正确', 'danger');
+                    } else {
+                        showAlert('保存失败: ' + (error.error || '未知错误'), 'danger');
+                    }
+                }
+            } catch (error) {
+                console.error('保存调整数据失败:', error);
+                showAlert('保存调整数据失败: ' + error.message, 'danger');
+            }
+        }
+        
+        function showAlert(message, type) {
+            const container = document.getElementById('alert-container');
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            container.innerHTML = '';
+            container.appendChild(alert);
+            
+            // 3秒后自动消失
+            setTimeout(() => {
+                if (alert.parentNode) {
+                    alert.parentNode.removeChild(alert);
+                }
+            }, 3000);
+        }
+        
+        // 点击模态框外部关闭
+        window.onclick = function(event) {
+            const modal = document.getElementById('adjustmentModal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        }
+    </script>
+</body>
+</html>
