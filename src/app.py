@@ -25,12 +25,35 @@ def init_auth_system():
     """初始化认证系统"""
     if CRYPTO_AUTH_CONFIG.get('ENABLED', True):
         # 启用加密认证
-        private_key = CRYPTO_AUTH_CONFIG['PRIVATE_KEY']
-        public_key = CRYPTO_AUTH_CONFIG['PUBLIC_KEY']
-        
-        # 设置全局认证实例
-        auth_module.crypto_auth = SimpleCryptoAuth(private_key, public_key)
-        print("加密认证系统已启用")
+        try:
+            # 优先使用文件路径配置
+            if 'PRIVATE_KEY_FILE' in CRYPTO_AUTH_CONFIG and 'PUBLIC_KEY_FILE' in CRYPTO_AUTH_CONFIG:
+                private_key_file = CRYPTO_AUTH_CONFIG['PRIVATE_KEY_FILE']
+                public_key_file = CRYPTO_AUTH_CONFIG['PUBLIC_KEY_FILE']
+                
+                # 设置全局认证实例（从文件读取）
+                auth_module.crypto_auth = SimpleCryptoAuth(
+                    private_key_file=private_key_file,
+                    public_key_file=public_key_file
+                )
+                print(f"加密认证系统已启用（从文件读取密钥: {private_key_file}, {public_key_file}）")
+            
+            # 兼容旧的字符串配置方式
+            elif 'PRIVATE_KEY' in CRYPTO_AUTH_CONFIG and 'PUBLIC_KEY' in CRYPTO_AUTH_CONFIG:
+                private_key = CRYPTO_AUTH_CONFIG['PRIVATE_KEY']
+                public_key = CRYPTO_AUTH_CONFIG['PUBLIC_KEY']
+                
+                # 设置全局认证实例（从字符串读取）
+                auth_module.crypto_auth = SimpleCryptoAuth(private_key, public_key)
+                print("加密认证系统已启用（从配置字符串读取密钥）")
+            
+            else:
+                raise ValueError("密钥配置不完整，请配置密钥文件路径或密钥字符串")
+                
+        except Exception as e:
+            print(f"加密认证系统初始化失败: {e}")
+            print("请检查密钥文件是否存在或密钥格式是否正确")
+            raise
     else:
         # 禁用加密认证，使用简单API密钥
         print("加密认证已禁用，使用简单API密钥认证")

@@ -1,6 +1,8 @@
 import time
 import json
 import base64
+import time
+import os
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.exceptions import InvalidSignature
@@ -8,17 +10,57 @@ from functools import wraps
 from flask import request, jsonify
 
 class SimpleCryptoAuth:
-    def __init__(self, private_key_pem, public_key_pem):
+    def __init__(self, private_key_pem=None, public_key_pem=None, private_key_file=None, public_key_file=None):
+        """初始化加密认证
+        
+        Args:
+            private_key_pem: 私钥PEM字符串（优先级高）
+            public_key_pem: 公钥PEM字符串（优先级高）
+            private_key_file: 私钥文件路径
+            public_key_file: 公钥文件路径
+        """
         # 加载私钥
-        self.private_key = serialization.load_pem_private_key(
-            private_key_pem.encode('utf-8'),
-            password=None
-        )
+        if private_key_pem:
+            # 从字符串加载私钥
+            self.private_key = serialization.load_pem_private_key(
+                private_key_pem.encode('utf-8'),
+                password=None
+            )
+        elif private_key_file:
+            # 从文件加载私钥
+            private_key_path = self._get_key_file_path(private_key_file)
+            with open(private_key_path, 'rb') as f:
+                self.private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None
+                )
+        else:
+            raise ValueError("必须提供私钥PEM字符串或私钥文件路径")
         
         # 加载公钥
-        self.public_key = serialization.load_pem_public_key(
-            public_key_pem.encode('utf-8')
-        )
+        if public_key_pem:
+            # 从字符串加载公钥
+            self.public_key = serialization.load_pem_public_key(
+                public_key_pem.encode('utf-8')
+            )
+        elif public_key_file:
+            # 从文件加载公钥
+            public_key_path = self._get_key_file_path(public_key_file)
+            with open(public_key_path, 'rb') as f:
+                self.public_key = serialization.load_pem_public_key(
+                    f.read()
+                )
+        else:
+            raise ValueError("必须提供公钥PEM字符串或公钥文件路径")
+    
+    def _get_key_file_path(self, key_file):
+        """获取密钥文件的绝对路径"""
+        if os.path.isabs(key_file):
+            return key_file
+        else:
+            # 相对路径，相对于项目根目录
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            return os.path.join(project_root, key_file)
     
     def verify_signature(self, message, signature_b64):
         """验证签名"""
@@ -37,14 +79,9 @@ class SimpleCryptoAuth:
         except (InvalidSignature, Exception):
             return False
     
-    def verify_auth_token(self, auth_data, signature, max_age=300, allowed_clients=None):
+    def verify_auth_token(self, auth_data, signature, max_age=300):
         """验证认证令牌"""
         try:
-            # 检查客户端ID
-            client_id = auth_data.get('client_id')
-            if allowed_clients and client_id not in allowed_clients:
-                return False, "客户端ID未授权"
-            
             # 检查时间戳
             current_time = int(time.time())
             if current_time - auth_data['timestamp'] > max_age:
@@ -100,11 +137,10 @@ def _require_crypto_auth(f):
             # 从配置获取参数
             from config import CRYPTO_AUTH_CONFIG
             max_age = CRYPTO_AUTH_CONFIG.get('TOKEN_MAX_AGE', 300)
-            allowed_clients = CRYPTO_AUTH_CONFIG.get('ALLOWED_CLIENTS')
             
             # 验证令牌
             is_valid, message = crypto_auth.verify_auth_token(
-                auth_data, signature, max_age, allowed_clients
+                auth_data, signature, max_age
             )
             if not is_valid:
                 return jsonify({'error': f'认证失败: {message}'}), 401

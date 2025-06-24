@@ -33,3 +33,11 @@ htmlcov/
 .ipynb_checkpoints
 
 src/config.py
+
+# Key files
+*.pem
+*.key
+*.crt
+quant_id_rsa*
+
+api/jq_config.py

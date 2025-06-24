@@ -10,8 +10,9 @@ qmt_jq/
 │   ├── app.py                    # Flask服务器，提供API接口
 │   ├── models/models.py          # 数据库模型，存储持仓信息
 │   ├── api/
-│   │   ├── jq_qmt_api.py        # 聚宽端API，用于上传持仓
-│   │   └── qmt_jq_trade.py      # QMT端API，用于同步持仓
+│   │   ├── jq_config.py        # 聚宽端配置文件（需要放到聚宽研究根目录）
+│   │   ├── jq_qmt_api.py        # 聚宽端API，用于上传持仓（需要放到聚宽研究根目录）
+│   │   └── qmt_jq_trade.py      # QMT端API，用于同步持仓（复制到QMT策略里执行）
 │   └── templates/index.html     # 持仓查看页面
 ├── demo/多策略V1.0.py            # 聚宽策略示例
 ├── test_jq.py                   # 测试文件
@@ -174,15 +175,71 @@ DB_CONFIG = {
 }
 ```
 ### 2. API地址配置
-在 jq_qmt_api.py 和 qmt_jq_trade.py 中修改：
+在 jq_config.py 和 qmt_jq_trade.py 中修改：
 
 ```
 API_URL = "http://你的服务器IP:端口"  # 例如: http://123.456.789.0:5366
 ```
+## 快速开始
+
+1. 克隆项目
+```bash
+git clone <repository-url>
+cd jq2qmt
+```
+
+2. 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+3. 生成密钥对
+```bash
+# Linux/macOS
+./generate_keys.sh
+
+# Windows
+generate_keys.bat
+```
+
+4. 配置数据库和API设置
+```bash
+cp src/config_template.py src/config.py
+# 编辑 src/config.py 配置文件
+# 将生成的密钥内容复制到配置文件中
+```
+
+5. 运行应用
+```bash
+python src/app.py
+```
+
+## 详细文档
+
+### 📖 API使用指南
+详细的API接口使用说明请参考：[API_USAGE.md](API_USAGE.md)
+
+该文档包含：
+- 完整的API接口说明
+- 认证机制详解（加密认证和简单认证）
+- 客户端使用示例
+- 安全建议和最佳实践
+- 错误处理和故障排除
+
+### 🔐 密钥生成指南
+密钥对生成的详细说明请参考：[KEYGEN_README.md](KEYGEN_README.md)
+
+该文档包含：
+- 密钥生成工具使用方法
+- 跨平台支持（Linux/macOS/Windows）
+- 密钥格式说明（PKCS#8和X.509）
+- 安全配置建议
+- 故障排除指南
+
 ## 部署步骤
 1. 安装依赖 ：
 ```
-pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 2. 配置数据库 ：
 - 安装MySQL
@@ -190,12 +247,12 @@ pip install -r requirements.txt
 - 配置 config.py
 3. 启动服务 ：
 ```
-cd src
-python app.py
+cd src
+python app.py
 ```
 4. 测试接口 ：
 ```
-python test_jq.py
+python test_jq.py
 ```
 ## 注意事项
 1. 网络连接 ：确保聚宽和QMT都能访问你的服务器
