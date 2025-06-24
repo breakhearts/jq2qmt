@@ -40,6 +40,10 @@ class StrategyPosition(db.Model):
             
             if not isinstance(pos['cost'], (int, float)) or pos['cost'] <= 0:
                 raise ValueError("成本价必须为正数")
+            
+            # 校验股票名称字段（可选）
+            if 'name' in pos and not isinstance(pos['name'], str):
+                raise ValueError("股票名称必须为字符串类型")
 
         # 执行更新
         strategy = StrategyPosition.query.filter_by(strategy_name=strategy_name).first()
@@ -93,6 +97,7 @@ class StrategyPosition(db.Model):
                 if code not in total_positions:
                     total_positions[code] = {
                         'code': code,
+                        'name': pos.get('name', ""),  
                         'total_volume': 0,
                         'total_cost': 0
                     }

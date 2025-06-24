@@ -10,7 +10,7 @@ def test_update_positions():
     positions = [
         {
             'code': '600219.XSHG',  # 银华日利
-            'volume': 200,
+            'volume': 100,
             'cost': 12
         }
     ]

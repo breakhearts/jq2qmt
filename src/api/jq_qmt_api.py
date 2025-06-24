@@ -4,7 +4,9 @@ import time
 import os
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
 import requests
+from kuanke.user_space_api import *
 try:
     import jq_config
 except:
@@ -27,12 +29,11 @@ class JQQMTAPI:
         self.simple_api_key = simple_api_key
         
         if use_crypto_auth:
-            private_key_path = private_key_file
-            with open(private_key_path, 'rb') as f:
-                self.private_key = serialization.load_pem_private_key(
-                    f.read(),
-                    password=None
-                )
+            self.private_key = serialization.load_pem_private_key(
+                read_file(private_key_file),
+                password=None,
+                backend=default_backend()
+            )
     
     def _create_auth_header(self):
         """创建认证头"""
@@ -72,6 +73,23 @@ class JQQMTAPI:
         
         return {'X-Auth-Token': auth_token}
     
+    def get_stock_name(self, code: str) -> str:
+        """
+        使用聚宽API获取股票名称
+        
+        Args:
+            code: 股票代码，如 '000001.XSHE'
+            
+        Returns:
+            股票名称，如果获取失败则返回股票代码
+        """
+        try:
+            security_info = get_security_info(code)
+            return security_info.display_name
+        except Exception as e:
+            print(f"获取股票名称失败 {code}: {e}")
+            return code
+    
     def update_positions(self, strategy_name: str, positions: list):
         """
         更新策略持仓到数据库
@@ -87,10 +105,17 @@ class JQQMTAPI:
                     }
                 ]
         """
+        # 为每个持仓添加股票名称
+        enriched_positions = []
+        for pos in positions:
+            enriched_pos = pos.copy()
+            enriched_pos['name'] = self.get_stock_name(pos['code'])
+            enriched_positions.append(enriched_pos)
+        
         url = f'{self.api_url}/api/v1/positions/update'
         data = {
             'strategy_name': strategy_name,
-            'positions': positions
+            'positions': enriched_positions
         }
         
         # 添加认证头

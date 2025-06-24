@@ -87,6 +87,7 @@
             <thead>
                 <tr>
                     <th>股票代码</th>
+                    <th>股票名称</th>
                     <th>总持仓</th>
                     <th>平均成本</th>
                 </tr>
@@ -124,6 +125,7 @@
             tbody.innerHTML = positions.map(p => `
                 <tr>
                     <td>${p.code}</td>
+                    <td>${p.name}</td>
                     <td>${p.total_volume}</td>
                     <td>${p.avg_cost.toFixed(2)}</td>
                 </tr>
@@ -139,6 +141,7 @@
                         <thead>
                             <tr>
                                 <th>股票代码</th>
+                                <th>股票名称</th>
                                 <th>持仓数量</th>
                                 <th>成本</th>
                             </tr>
@@ -147,6 +150,7 @@
                             ${strategy.positions.map(p => `
                                 <tr>
                                     <td>${p.code}</td>
+                                    <td>${p.name}</td>
                                     <td>${p.volume}</td>
                                     <td>${p.cost.toFixed(2)}</td>
                                 </tr>

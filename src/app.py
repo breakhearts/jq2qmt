@@ -96,6 +96,7 @@ def get_strategy_positions(strategy_name):
         return jsonify({
             'positions': [{
                 'code': position['code'],
+                'name': position.get('name', ""),
                 'volume': position['volume'],
                 'cost': position['cost'],
                 'update_time': position['update_time'].strftime('%Y-%m-%d %H:%M:%S')
@@ -127,6 +128,7 @@ def get_all_positions():
                 'strategy_name': item['strategy_name'],
                 'positions': [{
                     'code': pos['code'],
+                    'name': pos.get('name', ""),
                     'volume': pos['volume'],
                     'cost': pos['cost']
                 } for pos in item['positions']],
