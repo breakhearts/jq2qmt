@@ -40,4 +40,4 @@ src/config.py
 *.crt
 quant_id_rsa*
 
-api/jq_config.py
+src/api/jq_config.py
