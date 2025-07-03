@@ -240,7 +240,7 @@ class QMTAPI:
             return True, "科创板新股申购"
             
         # 沪市新股申购(730xxx)、深市新股申购(003xxx)
-        if pure_code.startswith(('730', '003')):
+        if pure_code.startswith(('730')):
             return True, "新股申购"
             
         return False, ""
