@@ -85,8 +85,11 @@ class QMTAPI:
                 max_orders_complete_retry -= 1
                 # 检查是否需要取消订单
                 status = self.try_orders_complete()
-                if status == WaitngOrderStatus.NEED_REPLACE or status == WaitngOrderStatus.COMPLETED:
+                if status == WaitngOrderStatus.COMPLETED:
                     break
+                elif status == WaitngOrderStatus.NEED_REPLACE:
+                    print(f"有订单撤销，等待待撤订单状态更新,等待{g.check_orders_interval}秒后重试...")
+                    continue                   
                 elif status == WaitngOrderStatus.PENDING_CANCEL:
                     print(f"等待未报和待撤订单状态更新,等待{g.check_orders_interval}秒后重试...")
                     continue
