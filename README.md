@@ -3,12 +3,20 @@
 ## 项目简介
 这是一个用于聚宽(JoinQuant)和QMT(迅投QMT)之间持仓同步的系统。简单来说，就是让你在聚宽上运行的策略能够自动把持仓信息传递给QMT，实现两个平台之间的仓位同步。
 
+### ✨ 特色功能
+- 🚀 **一键初始化**：使用 `init_project.py` 脚本，引导式配置所有必要参数
+- 🔐 **双重认证**：支持RSA加密认证和简单密码认证两种方式
+- 📊 **可视化管理**：Web界面查看持仓、手动调整仓位
+- 🛡️ **安全可靠**：密码加密存储，支持端口自适应配置
+
 ## 项目结构和工作原理
 ### 项目结构
 ```
 qmt_jq/
+├── init_project.py              # 🚀 一键初始化脚本（推荐使用）
 ├── src/
 │   ├── app.py                    # Flask服务器，提供API接口
+│   ├── config_template.py        # 配置文件模板
 │   ├── models/models.py          # 数据库模型，存储持仓信息
 │   ├── api/
 │   │   ├── jq_config.py        # 聚宽端配置文件（需要放到聚宽研究根目录）
@@ -22,6 +30,8 @@ qmt_jq/
 │       └── password.html        # 密码管理页面
 ├── demo/多策略V1.0.py            # 聚宽策略示例
 ├── test_jq.py                   # 测试文件
+├── generate_keys.sh             # Linux/macOS密钥生成脚本
+├── generate_keys.bat            # Windows密钥生成脚本
 └── requirements.txt             # 依赖包
 ```
 ### 工作原理
@@ -229,28 +239,81 @@ server_positions = api.get_total_positions()
 # (具体的交易逻辑需要结合QMT的交易API实现)
 ```
 ## 配置说明
-### 1. 服务器配置
-将 src/config_template.py 文件重命名为 config.py 并修改配置：
 
+### 🚀 推荐方式：使用初始化脚本
 
+**强烈推荐使用 `init_project.py` 进行引导式配置**，脚本会逐步引导您完成所有必要的配置：
+
+```bash
+python init_project.py
 ```
+
+初始化脚本会依次配置以下内容：
+
+#### 1. 数据库配置
+脚本会提示您输入以下数据库信息：
+- **数据库主机地址**：默认 `localhost`，如果数据库在其他服务器请输入相应IP
+- **数据库端口**：默认 `3306`，MySQL标准端口
+- **数据库用户名**：您的MySQL用户名
+- **数据库密码**：您的MySQL密码
+- **数据库名称**：默认 `quant`，用于存储持仓数据的数据库
+
+#### 2. API服务配置
+脚本会自动配置API服务参数：
+- **服务主机地址**：默认 `0.0.0.0`（监听所有网络接口）
+- **服务端口**：默认 `5366`（Flask应用监听端口）
+
+#### 3. 外部访问配置
+**重要**：您需要提供以下信息：
+- **服务器IP地址**：您的服务器公网IP或内网IP（必填）
+- **外部访问端口**：默认 `80`，聚宽和QMT访问您服务器的端口
+
+#### 4. 加密认证配置
+脚本会自动：
+- 生成RSA密钥对（用于聚宽端安全认证）
+- 配置加密认证参数
+- 设置简单API密钥（用于内部管理）
+
+#### 5. 自动生成的文件
+初始化完成后，脚本会自动生成：
+- `src/config.py` - 主配置文件
+- `src/api/jq_config.py` - 聚宽端配置文件
+- `src/api/qmt_jq_trade.py` - QMT端配置文件（已更新API_URL）
+- `quant_id_rsa_pkcs8.pem` - RSA私钥文件
+- `quant_id_rsa_public.pem` - RSA公钥文件
+
+### 📝 手动配置方式（不推荐）
+
+如果您需要手动配置，可以参考以下步骤：
+
+#### 1. 服务器配置
+将 `src/config_template.py` 文件重命名为 `config.py` 并修改配置：
+
+```python
 # 数据库配置
 DB_CONFIG = {
     'drivername': 'mysql+pymysql',
-    'host': '127.0.0.1',
+    'host': '127.0.0.1',           # 数据库主机地址
     'username': 'username',         # 替换成你的数据库用户名
     'password': 'password',         # 替换成你的数据库密码
-    'database': 'quant',
-    'port': 3306
+    'database': 'quant',           # 数据库名称
+    'port': 3306                   # 数据库端口
 }
 ```
-### 2. API地址配置
-在 jq_config.py 和 qmt_jq_trade.py 中修改：
 
-```
+#### 2. API地址配置
+在 `jq_config.py` 和 `qmt_jq_trade.py` 中修改：
+
+```python
 API_URL = "http://你的服务器IP:端口"  # 例如: http://123.456.789.0:5366
 ```
+
+**注意**：如果使用80端口，URL中不需要包含端口号：
+- 80端口：`http://123.456.789.0`
+- 其他端口：`http://123.456.789.0:5366`
 ## 快速开始
+
+### 🚀 一键配置（推荐）
 
 1. 克隆项目
 ```bash
@@ -263,23 +326,24 @@ cd jq2qmt
 pip install -r requirements.txt
 ```
 
-3. 生成密钥对
+3. 运行初始化脚本（一键配置）
 ```bash
-# Linux/macOS
-./generate_keys.sh
-
-# Windows
-generate_keys.bat
+python init_project.py
 ```
 
-4. 配置数据库和API设置
-```bash
-cp src/config_template.py src/config.py
-# 编辑 src/config.py 配置文件
-# 将生成的密钥内容复制到配置文件中
-```
+**初始化脚本会自动完成以下操作：**
+- ✅ 生成RSA密钥对
+- ✅ 配置数据库连接信息
+- ✅ 设置API服务参数
+- ✅ 配置外部访问地址
+- ✅ 生成所有必要的配置文件
+- ✅ 验证配置正确性
 
-5. 运行应用
+**您只需要准备：**
+- MySQL数据库的连接信息（主机、用户名、密码等）
+- 服务器的IP地址（用于外部访问）
+
+4. 运行应用
 ```bash
 python src/app.py
 ```
