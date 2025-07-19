@@ -13,10 +13,10 @@ from datetime import datetime
 
 # Redis配置（与QMT脚本保持一致）
 REDIS_CONFIG = {
-    'HOST': '182.92.240.95',
+    'HOST': '0.0.0.0',
     'PORT': 5001,
     'DB': 1,
-    'PASSWORD': 'Lemo@1995',
+    'PASSWORD': 'REDACTED_REDIS_PASSWORD',
     'CACHE_PREFIX': 'jq_qmt:',
     'CHANNELS': {
        'POSITION_UPDATE': 'jq_qmt:position_update',
