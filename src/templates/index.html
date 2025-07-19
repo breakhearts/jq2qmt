@@ -1,18 +1,82 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>策略持仓查看</title>
+    <title>策略持仓查看 - JQ-QMT</title>
     <meta charset="utf-8">
     <style>
         body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            margin: 0;
+            background: #f5f5f5;
         }
+        
+        .header {
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .header h1 {
+            color: #333;
+            font-size: 1.5rem;
+            margin: 0;
+        }
+        
+        .header .user-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .header .nav-links {
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .header .nav-links a {
+            text-decoration: none;
+            color: #667eea;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        
+        .header .nav-links a:hover {
+            background-color: #f0f0f0;
+        }
+        
+        .header .nav-links a.active {
+            background-color: #667eea;
+            color: white;
+        }
+        
+        .logout-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        
         .strategy-section {
             margin-bottom: 30px;
             border: 1px solid #ddd;
             padding: 15px;
             border-radius: 5px;
+            background: white;
         }
         .strategy-name {
             font-size: 18px;
@@ -86,14 +150,27 @@
     </style>
 </head>
 <body>
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+    <div class="header">
         <h1>策略持仓信息</h1>
-        <div>
-            <a href="/adjustment" style="margin-right: 15px; color: #007bff; text-decoration: none; font-size: 16px;">持仓调整 →</a>
-            <a href="/password" style="margin-right: 15px; color: #007bff; text-decoration: none; font-size: 16px;">密码管理 →</a>
-            <button class="refresh-btn" onclick="refreshData()">刷新数据</button>
+        <div class="user-info">
+            <div class="nav-links">
+                <a href="/" class="active">持仓查看</a>
+                <a href="/adjustment">持仓调整</a>
+                <a href="/password">密码管理</a>
+                {% if session.is_superuser or (current_user and current_user.is_superuser) %}
+                <a href="/users">用户管理</a>
+                {% endif %}
+            </div>
+            <span>欢迎，{{ session.user_id or (current_user.username if current_user else 'Unknown') }}！</span>
+            <a href="/logout" class="logout-btn">退出登录</a>
         </div>
     </div>
+    
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2>策略持仓概览</h2>
+            <button class="refresh-btn" onclick="refreshData()">刷新数据</button>
+        </div>
     
     <div class="total-positions">
         <h2 class="section-title">总持仓</h2>
@@ -198,5 +275,6 @@
         // 每60秒自动刷新一次数据
         setInterval(refreshData, 60000);
     </script>
+    </div> <!-- 结束 container -->
 </body>
 </html>

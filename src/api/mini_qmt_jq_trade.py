@@ -1,0 +1,486 @@
+# -*- coding: utf-8 -*-
+"""
+Mini QMT 交易 API - 基于 qmt_jq_trade.py 的结构
+支持Redis Pub/Sub订阅模式的独立运行脚本
+"""
+import os
+import random
+import time
+import json
+import requests
+import threading
+import redis
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Dict, List
+
+from xtquant import xtdata
+from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
+from xtquant.xttype import StockAccount
+from xtquant import xtconstant
+
+from src.config import MINI_QMT_CONFIG, API_HOST, API_PORT, REDIS_CONFIG
+
+class WaitingOrderStatus(Enum):
+    COMPLETED = "COMPLETED"
+    NEED_REPLACE = "NEED_REPLACE"
+    PENDING_CANCEL = "PENDING"
+    ERROR = "ERROR"
+
+class MiniQmtTraderCallback(XtQuantTraderCallback):
+    def on_disconnected(self):
+        print("mini qmt connection disconnected")
+
+    def on_stock_order(self, order):
+        print(f"on_stock_order: {order.order_id} | {order.order_status} | {order.stock_code}")
+
+    def on_stock_trade(self, trade):
+        print(f"on_stock_trade: {trade.order_id} | {trade.stock_code} | {trade.traded_price}")
+
+    def on_order_error(self, order_error):
+        print(f"on_order_error: {order_error.order_id} | {order_error.error_id} | {order_error.error_msg}")
+
+class MiniQmtTrade:
+    def __init__(self, is_simulation=False, strategy_names=None):
+        self.is_simulation = is_simulation
+        self.path = MINI_QMT_CONFIG['PATH_SIMULATION'] if is_simulation else MINI_QMT_CONFIG['PATH']
+        self.account_id = MINI_QMT_CONFIG['ACCOUNT_ID']
+        self.session_id = random.randint(*MINI_QMT_CONFIG['SESSION_ID_RANGE'])
+        self.trader = None
+        self.api_url = f"http://{API_HOST}:{API_PORT}"
+        self.strategy_names = strategy_names
+        self.latest_update_time = None
+        self.check_orders_interval = 5
+        self.sync_positions_interval = 5
+        
+        # Redis配置
+        self.redis_enabled = REDIS_CONFIG.get('ENABLED', False)
+        self.redis_client = None
+        self.pubsub = None
+        self.redis_thread = None
+        self.local_cache = {}
+        self.last_sync_time = None
+        self.stop_flag = False
+        
+        # 初始化Redis连接
+        if self.redis_enabled:
+            self._init_redis()
+
+    def _init_redis(self):
+        """初始化Redis连接和订阅"""
+        try:
+            print("=== 初始化Redis连接 ===")
+            self.redis_client = redis.Redis(
+                host=REDIS_CONFIG['HOST'],
+                port=REDIS_CONFIG['PORT'],
+                db=REDIS_CONFIG['DB'],
+                password=REDIS_CONFIG['PASSWORD'],
+                decode_responses=True
+            )
+            
+            # 测试连接
+            self.redis_client.ping()
+            print(f"Redis连接成功: {REDIS_CONFIG['HOST']}:{REDIS_CONFIG['PORT']}")
+            
+            # 设置pub/sub
+            self.pubsub = self.redis_client.pubsub()
+            channels = [
+                REDIS_CONFIG['CHANNELS']['POSITION_UPDATE'],
+                REDIS_CONFIG['CHANNELS']['STRATEGY_UPDATE'],
+                REDIS_CONFIG['CHANNELS']['TOTAL_POSITIONS_UPDATE']
+            ]
+            self.pubsub.subscribe(channels)
+            print(f"已订阅Redis频道: {channels}")
+            
+            # 启动Redis监听线程
+            self.redis_thread = threading.Thread(target=self._redis_listener, daemon=True)
+            self.redis_thread.start()
+            print("Redis pub/sub监听器已启动")
+            print("✓ Redis pub/sub模式已启用，将减少HTTP请求频率")
+            
+        except Exception as e:
+            print(f"Redis初始化失败: {e}")
+            print("将使用HTTP轮询模式")
+            self.redis_enabled = False
+            self.redis_client = None
+
+    def _redis_listener(self):
+        """Redis消息监听器"""
+        print("Redis消息监听器开始工作")
+        try:
+            for message in self.pubsub.listen():
+                if self.stop_flag:
+                    break
+                    
+                if message['type'] == 'message':
+                    try:
+                        data = json.loads(message['data'])
+                        print(f"收到Redis消息 - 频道: {message['channel']}")
+                        print(f"消息内容: {data}")
+                        
+                        # 根据消息类型处理
+                        if message['channel'] in [
+                            REDIS_CONFIG['CHANNELS']['POSITION_UPDATE'],
+                            REDIS_CONFIG['CHANNELS']['STRATEGY_UPDATE'],
+                            REDIS_CONFIG['CHANNELS']['TOTAL_POSITIONS_UPDATE']
+                        ]:
+                            self._handle_position_update_message(data)
+                            
+                    except json.JSONDecodeError as e:
+                        print(f"解析Redis消息失败: {e}")
+                    except Exception as e:
+                        print(f"处理Redis消息失败: {e}")
+                        
+        except Exception as e:
+            print(f"Redis监听器错误: {e}")
+        finally:
+            print("Redis消息监听器已停止")
+
+    def _handle_position_update_message(self, data):
+        """处理持仓更新消息"""
+        try:
+            strategy_names = data.get('strategy_names', [])
+            update_time = data.get('update_time')
+            
+            # 检查是否是我们关心的策略
+            if self.strategy_names:
+                if not any(name in strategy_names for name in self.strategy_names):
+                    return
+            
+            print(f"检测到持仓更新: 策略={strategy_names}, 时间={update_time}")
+            
+            # 触发同步
+            threading.Thread(target=self.sync_positions, daemon=True).start()
+            
+        except Exception as e:
+            print(f"处理持仓更新消息失败: {e}")
+
+    def connect(self):
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(f"Mini QMT path not found: {self.path}")
+        
+        self.trader = XtQuantTrader(self.path, self.session_id)
+        callback = MiniQmtTraderCallback()
+        self.trader.register_callback(callback)
+        self.trader.start()
+        
+        connect_result = self.trader.connect()
+        if connect_result != 0:
+            raise ConnectionError(f"Failed to connect to Mini QMT, error code: {connect_result}")
+        
+        print(f"Mini QMT connected successfully. Session ID: {self.session_id}")
+        return True
+
+    def get_account(self):
+        return StockAccount(self.account_id, MINI_QMT_CONFIG['ACCOUNT_TYPE'])
+
+    def get_total_positions(self) -> Dict:
+        """获取总持仓数据，支持缓存"""
+        cache_key = 'total_positions'
+        cache_timeout = 30  # 缓存30秒
+        
+        # 检查本地缓存
+        if cache_key in self.local_cache:
+            cache_data = self.local_cache[cache_key]
+            cache_age = time.time() - cache_data['timestamp']
+            if cache_age < cache_timeout:
+                if self.redis_enabled:
+                    print(f"使用缓存的持仓数据 (缓存时间: {cache_age:.1f}秒)")
+                return cache_data['data']
+        
+        # 从API获取数据
+        try:
+            url = f'{self.api_url}/api/v1/positions/total'
+            if self.strategy_names:
+                url += f'?strategies={",".join(self.strategy_names)}'
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                print(f'获取总持仓失败: HTTP {response.status_code}')
+                return {'positions': [], 'update_time': None}
+            data = response.json()
+            result = {'positions': data['positions'], 'update_time': data.get('update_time')}
+            
+            # 更新本地缓存
+            self.local_cache[cache_key] = {
+                'data': result,
+                'timestamp': time.time()
+            }
+            
+            return result
+        except Exception as e:
+            print(f'获取总持仓错误: {e}')
+            return {'positions': [], 'update_time': None}
+
+    def sync_positions(self):
+        """同步持仓"""
+        current_time = time.time()
+        
+        # Redis模式下避免过于频繁的同步
+        if self.redis_enabled and self.last_sync_time:
+            time_since_last_sync = current_time - self.last_sync_time
+            if time_since_last_sync < 2:  # 2秒内不重复同步
+                print(f"Redis pub/sub模式: 距离上次同步仅{time_since_last_sync:.1f}秒，跳过本次同步")
+                return
+        
+        total_data = self.get_total_positions()
+        current_update_time = total_data.get('update_time')
+        
+        if current_update_time is None:
+            print("获取持仓数据失败，跳过本次同步")
+            return
+    
+        if self.latest_update_time and current_update_time == self.latest_update_time:
+            if self.redis_enabled:
+                print("Redis pub/sub模式: 数据未更新，跳过同步")
+            return
+
+        mode_text = "Redis pub/sub" if self.redis_enabled else "HTTP轮询"
+        print(f"\n=== 开始持仓同步 (Mini QMT - {mode_text}模式) ===")
+        
+        positions = total_data.get('positions', [])
+        if not positions:
+            print("目标持仓为空")
+            self.latest_update_time = current_update_time
+            self.last_sync_time = current_time
+            print(f"=== 持仓同步结束 (更新时间: {self.latest_update_time}) ===\n")
+            return
+            
+        # 获取当前持仓
+        try:
+            current_positions = self._get_current_positions()
+            print(f"当前持仓: {len(current_positions)} 只股票")
+            print(f"目标持仓: {len(positions)} 只股票") 
+            
+            # 执行同步逻辑
+            self._execute_position_sync(current_positions, positions)
+            
+        except Exception as e:
+            print(f"持仓同步异常: {e}")
+        
+        self.latest_update_time = current_update_time
+        self.last_sync_time = current_time
+        print(f"=== 持仓同步结束 (更新时间: {self.latest_update_time}) ===\n")
+
+    def _get_current_positions(self):
+        """获取当前持仓"""
+        if not self.trader:
+            return {}
+        
+        try:
+            account = self.get_account()
+            positions = self.trader.query_stock_positions(account)
+            if not positions:
+                return {}
+            
+            result = {}
+            for pos in positions:
+                if pos.volume > 0:  # 只关心有持仓的股票
+                    result[pos.stock_code] = {
+                        'volume': pos.volume,
+                        'can_use_volume': pos.can_use_volume,
+                        'avg_price': pos.avg_price
+                    }
+            return result
+        except Exception as e:
+            print(f"获取当前持仓失败: {e}")
+            return {}
+
+    def _execute_position_sync(self, current_positions, target_positions):
+        """执行持仓同步逻辑"""
+        # 处理目标持仓
+        target_dict = {}
+        for pos in target_positions:
+            stock_code = pos['code']
+            target_volume = int(pos['total_volume'])
+            target_dict[stock_code] = target_volume
+        
+        # 计算需要买入和卖出的股票
+        buy_orders = []
+        sell_orders = []
+        
+        # 检查需要卖出的股票
+        for stock_code, current_data in current_positions.items():
+            current_volume = current_data['volume']
+            target_volume = target_dict.get(stock_code, 0)
+            
+            if current_volume > target_volume:
+                sell_volume = current_volume - target_volume
+                if sell_volume > 0:
+                    sell_orders.append({
+                        'stock_code': stock_code,
+                        'volume': sell_volume
+                    })
+        
+        # 检查需要买入的股票
+        for stock_code, target_volume in target_dict.items():
+            current_volume = current_positions.get(stock_code, {}).get('volume', 0)
+            
+            if target_volume > current_volume:
+                buy_volume = target_volume - current_volume
+                if buy_volume > 0:
+                    buy_orders.append({
+                        'stock_code': stock_code,
+                        'volume': buy_volume
+                    })
+        
+        # 执行卖出订单
+        for order in sell_orders:
+            try:
+                self.place_order(order['stock_code'], order['volume'], 'sell')
+                time.sleep(0.1)  # 避免下单过快
+            except Exception as e:
+                print(f"卖出订单失败 {order['stock_code']}: {e}")
+        
+        # 执行买入订单  
+        for order in buy_orders:
+            try:
+                self.place_order(order['stock_code'], order['volume'], 'buy')
+                time.sleep(0.1)  # 避免下单过快
+            except Exception as e:
+                print(f"买入订单失败 {order['stock_code']}: {e}")
+        
+        print(f"同步完成: 卖出{len(sell_orders)}只，买入{len(buy_orders)}只")
+
+    def place_order(self, stock_code, volume, direction):
+        if not self.trader:
+            raise ConnectionError("Mini QMT not connected.")
+        
+        price_info = xtdata.get_full_tick([stock_code])
+        if not price_info or stock_code not in price_info:
+            print(f"获取 {stock_code} 行情失败")
+            return -1
+
+        last_price = price_info[stock_code]['lastPrice']
+        precision = MINI_QMT_CONFIG['PRICE_PRECISION'].get('FUND' if self._is_fund(stock_code) else 'STOCK', 2)
+        
+        if direction == 'buy':
+            price_offset = MINI_QMT_CONFIG['PRICE_OFFSET']['BUY']
+            order_price = round(last_price + price_offset, precision)
+            order_type = xtconstant.STOCK_BUY
+        else: # sell
+            price_offset = MINI_QMT_CONFIG['PRICE_OFFSET']['SELL']
+            order_price = round(last_price + price_offset, precision)
+            order_type = xtconstant.STOCK_SELL
+
+        account = self.get_account()
+        order_id = self.trader.order_stock(account, stock_code, order_type, volume, 2, 'price', order_price, '')
+        
+        if order_id == -1:
+            print(f"下单失败: {stock_code}")
+        else:
+            print(f'下单成功: {stock_code}, {"买入" if direction == "buy" else "卖出"}, {volume} 股, 价格 {order_price}')
+        return order_id
+
+    def _is_fund(self, code: str) -> bool:
+        pure_code = code.split('.')[0]
+        return pure_code.startswith(('51', '15', '16', '519'))
+
+    def stop(self):
+        """停止Mini QMT连接和Redis监听"""
+        print("正在停止Mini QMT Trade...")
+        self.stop_flag = True
+        
+        # 停止Redis相关
+        if self.pubsub:
+            try:
+                self.pubsub.close()
+                print("Redis pub/sub连接已关闭")
+            except Exception as e:
+                print(f"关闭Redis pub/sub失败: {e}")
+        
+        if self.redis_thread and self.redis_thread.is_alive():
+            self.redis_thread.join(timeout=2)
+            print("Redis监听线程已停止")
+        
+        # 停止QMT连接
+        if self.trader:
+            self.trader.stop()
+            print("Mini QMT连接已停止")
+        
+        print("Mini QMT Trade已完全停止")
+
+    def run_daemon(self):
+        """以守护进程模式运行"""
+        print("=== Mini QMT Trade 守护进程启动 ===")
+        
+        # 连接QMT
+        try:
+            self.connect()
+        except Exception as e:
+            print(f"连接Mini QMT失败: {e}")
+            return
+        
+        # 初始同步
+        print("执行初始持仓同步...")
+        self.sync_positions()
+        
+        # 设置定时同步间隔
+        if self.redis_enabled:
+            # Redis模式使用较长间隔，主要依赖消息通知
+            sync_interval = 15  # 15秒
+            print(f"Redis pub/sub模式: 定时同步间隔{sync_interval}秒")
+        else:
+            # HTTP轮询模式使用较短间隔
+            sync_interval = self.sync_positions_interval
+            print(f"HTTP轮询模式: 定时同步间隔{sync_interval}秒")
+        
+        last_sync_time = time.time()
+        
+        try:
+            while not self.stop_flag:
+                current_time = time.time()
+                
+                # 定时同步
+                if current_time - last_sync_time >= sync_interval:
+                    try:
+                        self.sync_positions()
+                        last_sync_time = current_time
+                    except Exception as e:
+                        print(f"定时同步失败: {e}")
+                
+                # 短暂休眠
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            print("\n收到停止信号...")
+        except Exception as e:
+            print(f"运行时错误: {e}")
+        finally:
+            self.stop()
+
+def adjust(ContextInfo):
+    """QMT平台调用的调整函数"""
+    # 这里可以创建MiniQmtTrade实例并调用sync_positions
+    # 但建议使用独立运行模式
+    pass
+
+def init(ContextInfo):
+    """QMT平台调用的初始化函数"""
+    print("Initializing Mini QMT Trading Script")
+    # 在QMT环境中的初始化逻辑
+
+def main():
+    """独立运行的主函数"""
+    print("=== Mini QMT Trade 独立运行模式 ===")
+    
+    # 创建交易实例
+    # 可以指定策略名称，如果不指定则同步所有策略
+    strategy_names = None  # 或者 ['hand_strategy', 'other_strategy']
+    
+    trader = MiniQmtTrade(
+        is_simulation=False,  # 设置为True使用模拟环境
+        strategy_names=strategy_names
+    )
+    
+    try:
+        # 运行守护进程
+        trader.run_daemon()
+    except KeyboardInterrupt:
+        print("\n程序被用户中断")
+    except Exception as e:
+        print(f"程序异常退出: {e}")
+    finally:
+        trader.stop()
+
+if __name__ == "__main__":
+    main()

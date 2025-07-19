@@ -2,6 +2,7 @@ blinker==1.9.0
 click==8.1.8
 Flask==3.1.0
 Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
 importlib_metadata==8.6.1
 itsdangerous==2.2.0
 Jinja2==3.1.6
@@ -13,3 +14,4 @@ Werkzeug==3.1.3
 zipp==3.21.0
 requests==2.31.0
 cryptography==41.0.7
+redis==5.0.1

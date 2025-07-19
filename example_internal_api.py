@@ -87,7 +87,7 @@ def test_set_new_password():
     url = f"{API_BASE_URL}/api/v1/internal/password/set"
     
     data = {
-        "internal_password": INTERNAL_PASSWORD,  # 当前密码
+        "current_password": INTERNAL_PASSWORD,  # 当前密码
         "new_password": "newpassword123"  # 新密码
     }
     
