@@ -17,7 +17,7 @@ def example_crypto_auth():
     print("=== 使用加密认证 ===")
     
     # 从配置文件获取私钥
-    private_key_pem = CRYPTO_AUTH_CONFIG['PRIVATE_KEY']
+    private_key_pem = CRYPTO_AUTH_CONFIG['PRIVATE_KEY_FILE']
     
     # 示例1：使用PEM字符串加载密钥
     api = JQQMTAPI(

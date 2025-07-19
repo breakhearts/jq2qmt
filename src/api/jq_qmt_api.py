@@ -6,7 +6,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 import requests
-from kuanke.user_space_api import *
+
+try:
+    from kuanke.user_space_api import *
+except:
+    pass
 try:
     import jq_config
 except:
@@ -24,7 +28,6 @@ class JQQMTAPI:
             simple_api_key: 简单API密钥（当不使用加密认证时）
         """
         self.api_url = api_url
-        self.client_id = client_id
         self.use_crypto_auth = use_crypto_auth
         self.simple_api_key = simple_api_key
         

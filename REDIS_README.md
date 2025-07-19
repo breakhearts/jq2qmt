@@ -34,7 +34,7 @@ REDIS_CONFIG = {
     'HOST': 'xxx.xxx.xxx.xx',    # Redis服务器地址
     'PORT': xxxx,               # Redis端口
     'DB': 1,                    # Redis数据库编号
-    'PASSWORD': 'Lemo@1995',    # Redis密码
+    'PASSWORD': 'xxxxxxxxx',    # Redis密码
     
     # Redis 使用配置
     'CACHE_PREFIX': 'jq_qmt:',         # 缓存键前缀
