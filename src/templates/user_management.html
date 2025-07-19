@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用户管理 - JQ-QMT</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Microsoft YaHei', 'PingFang SC', Arial, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            color: #333;
+            font-size: 1.5rem;
+        }
+        
+        .header .user-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .header .nav-links {
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .header .nav-links a {
+            text-decoration: none;
+            color: #667eea;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        
+        .header .nav-links a:hover {
+            background-color: #f0f0f0;
+        }
+        
+        .logout-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .card-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .card-header h2 {
+            color: #333;
+            font-size: 1.3rem;
+        }
+        
+        .card-body {
+            padding: 1.5rem;
+        }
+        
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        
+        .table th,
+        .table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .badge-success {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .badge-danger {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .badge-warning {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 0.9rem;
+            margin: 0.2rem;
+        }
+        
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-warning {
+            background: #ffc107;
+            color: #212529;
+        }
+        
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .btn:hover {
+            opacity: 0.8;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-card h3 {
+            color: #333;
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-card p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 1rem;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        
+        .modal-content {
+            background: white;
+            margin: 10% auto;
+            padding: 2rem;
+            border-radius: 10px;
+            width: 90%;
+            max-width: 500px;
+        }
+        
+        .close {
+            float: right;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #999;
+        }
+        
+        .close:hover {
+            color: #333;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 0 1rem;
+            }
+            
+            .table {
+                font-size: 0.8rem;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>用户管理系统</h1>
+        <div class="user-info">
+            <div class="nav-links">
+                <a href="/">持仓查看</a>
+                <a href="/adjustment">持仓调整</a>
+                <a href="/password">密码管理</a>
+                <a href="/users" class="active">用户管理</a>
+            </div>
+            <span>欢迎，{{ current_user.username }}！</span>
+            <a href="/logout" class="logout-btn">退出登录</a>
+        </div>
+    </div>
+    
+    <div class="container">
+        <!-- 统计卡片 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>{{ stats.total_users }}</h3>
+                <p>总用户数</p>
+            </div>
+            <div class="stat-card">
+                <h3>{{ stats.active_users }}</h3>
+                <p>活跃用户</p>
+            </div>
+            <div class="stat-card">
+                <h3>{{ stats.superusers }}</h3>
+                <p>超级管理员</p>
+            </div>
+            <div class="stat-card">
+                <h3>{{ stats.users_with_keys }}</h3>
+                <p>配置密钥用户</p>
+            </div>
+        </div>
+        
+        <!-- 用户列表 -->
+        <div class="card">
+            <div class="card-header">
+                <h2>用户列表</h2>
+                <button class="btn btn-primary" onclick="showCreateUserModal()">创建新用户</button>
+            </div>
+            <div class="card-body">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>用户名</th>
+                            <th>权限</th>
+                            <th>状态</th>
+                            <th>密钥状态</th>
+                            <th>创建时间</th>
+                            <th>最后登录</th>
+                            <th>最后活跃</th>
+                            <th>登录次数</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr>
+                            <td>{{ user.id }}</td>
+                            <td>{{ user.username }}</td>
+                            <td>
+                                {% if user.is_superuser %}
+                                    <span class="badge badge-danger">超级管理员</span>
+                                {% else %}
+                                    <span class="badge badge-success">普通用户</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if user.is_active %}
+                                    <span class="badge badge-success">活跃</span>
+                                {% else %}
+                                    <span class="badge badge-danger">禁用</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if user.has_private_key and user.has_public_key %}
+                                    <span class="badge badge-success">已配置</span>
+                                {% elif user.has_private_key or user.has_public_key %}
+                                    <span class="badge badge-warning">部分配置</span>
+                                {% else %}
+                                    <span class="badge badge-danger">未配置</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ user.created_time }}</td>
+                            <td>{{ user.last_login_time }}</td>
+                            <td>{{ user.last_activity_time }}</td>
+                            <td>{{ user.login_count }}</td>
+                            <td>
+                                <button class="btn btn-warning" onclick="editUser('{{ user.username }}')">编辑</button>
+                                {% if not user.is_superuser %}
+                                <button class="btn btn-danger" onclick="deleteUser('{{ user.username }}')">删除</button>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 创建用户模态框 -->
+    <div id="createUserModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('createUserModal')">&times;</span>
+            <h2>创建新用户</h2>
+            <form method="POST" action="/users/create">
+                <div class="form-group">
+                    <label for="new_username">用户名</label>
+                    <input type="text" id="new_username" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label for="new_password">密码</label>
+                    <input type="password" id="new_password" name="password" required>
+                </div>
+                <div class="form-group">
+                    <label for="confirm_password">确认密码</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required>
+                </div>
+                <div class="form-group">
+                    <label for="is_superuser">权限级别</label>
+                    <select id="is_superuser" name="is_superuser">
+                        <option value="0">普通用户</option>
+                        <option value="1">超级管理员</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary">创建用户</button>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        function showCreateUserModal() {
+            document.getElementById('createUserModal').style.display = 'block';
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+        
+        function editUser(username) {
+            // 这里可以添加编辑用户的逻辑
+            alert('编辑用户功能待实现: ' + username);
+        }
+        
+        function deleteUser(username) {
+            if (confirm('确定要删除用户 ' + username + ' 吗？')) {
+                // 发送删除请求
+                fetch('/users/delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({username: username})
+                }).then(response => {
+                    if (response.ok) {
+                        location.reload();
+                    } else {
+                        alert('删除用户失败');
+                    }
+                });
+            }
+        }
+        
+        // 点击模态框外部关闭
+        window.onclick = function(event) {
+            const modals = document.querySelectorAll('.modal');
+            modals.forEach(modal => {
+                if (event.target === modal) {
+                    modal.style.display = 'none';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
