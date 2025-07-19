@@ -1,0 +1,870 @@
+#coding:gbk
+
+import requests
+from typing import Dict, List
+from datetime import datetime, timedelta
+import time
+from enum import Enum
+import threading
+import json
+
+# Redis相关导入
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    print("Redis模块未安装，将使用HTTP轮询模式")
+
+class WaitngOrderStatus(Enum):
+    COMPLETED = "COMPLETED"         # 所有订单已完成
+    NEED_REPLACE = "NEED_REPLACE"   # 有订单已撤单，需要重新下单
+    PENDING_CANCEL = "PENDING"      # 有订单等待交易所处理
+    ERROR = "ERROR"                 # 其他错误
+
+# Redis配置（从配置文件读取）
+REDIS_CONFIG = {
+    'ENABLED': True,
+    'HOST': '0.0.0.0',
+    'PORT': 5001,
+    'DB': 1,
+    'PASSWORD': 'REDACTED_REDIS_PASSWORD',
+    'CACHE_PREFIX': 'jq_qmt:',
+    'CHANNELS': {
+        'POSITION_UPDATE': 'jq_qmt:position_update',        # 单个策略持仓更新通知
+        'STRATEGY_UPDATE': 'jq_qmt:strategy_update',        # 策略更新通知
+        'TOTAL_POSITIONS_UPDATE': 'jq_qmt:total_positions_update',  # 总持仓更新通知
+    }
+}
+
+API_URL = "http://127.0.0.1:5366"  # 本地服务器API地址
+
+class G():
+    def __init__(self):
+        self.latest_update_time = None
+        self.check_orders_scheduled = False  # 新增：标记是否有计划中的检查任务
+        self.strategy_name = "sync_positions"
+        self.place_order_max_retry = 10
+        self.check_orders_interval = 5  # 检查订单状态的时间间隔（秒）
+        self.sync_positions_interval = 5  # 持仓同步的时间间隔（秒）
+        self.strategy_names = [
+            'hand_strategy'
+        ]
+        # Redis相关属性
+        self.redis_client = None
+        self.redis_pubsub = None
+        self.redis_listener_thread = None
+        self.redis_connected = False
+        self.use_redis_pubsub = False  # 是否启用Redis pub/sub模式
+
+g = G()
+
+
+def init_redis_connection():
+    """初始化Redis连接"""
+    if not REDIS_AVAILABLE or not REDIS_CONFIG.get('ENABLED', False):
+        print("Redis未启用或模块不可用，使用HTTP轮询模式")
+        return False
+    
+    try:
+        g.redis_client = redis.Redis(
+            host=REDIS_CONFIG.get('HOST', 'localhost'),
+            port=REDIS_CONFIG.get('PORT', 6379),
+            db=REDIS_CONFIG.get('DB', 0),
+            password=REDIS_CONFIG.get('PASSWORD', None),
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5
+        )
+        
+        # 测试连接
+        g.redis_client.ping()
+        g.redis_connected = True
+        print(f"Redis连接成功: {REDIS_CONFIG.get('HOST')}:{REDIS_CONFIG.get('PORT')}")
+        return True
+        
+    except Exception as e:
+        print(f"Redis连接失败: {e}")
+        g.redis_connected = False
+        g.redis_client = None
+        return False
+
+def start_redis_subscriber():
+    """启动Redis订阅监听器"""
+    if not g.redis_connected or not g.redis_client:
+        return False
+    
+    try:
+        g.redis_pubsub = g.redis_client.pubsub()
+        
+        # 订阅相关频道
+        channels = REDIS_CONFIG.get('CHANNELS', {})
+        if channels.get('POSITION_UPDATE'):
+            g.redis_pubsub.subscribe(channels['POSITION_UPDATE'])
+        if channels.get('STRATEGY_UPDATE'):
+            g.redis_pubsub.subscribe(channels['STRATEGY_UPDATE'])
+        if channels.get('TOTAL_POSITIONS_UPDATE'):
+            g.redis_pubsub.subscribe(channels['TOTAL_POSITIONS_UPDATE'])
+            
+        print(f"已订阅Redis频道: {list(channels.values())}")
+        
+        # 启动监听线程
+        g.redis_listener_thread = threading.Thread(
+            target=redis_message_listener, 
+            daemon=True
+        )
+        g.redis_listener_thread.start()
+        
+        g.use_redis_pubsub = True
+        print("Redis pub/sub监听器已启动")
+        return True
+        
+    except Exception as e:
+        print(f"启动Redis订阅失败: {e}")
+        return False
+
+def redis_message_listener():
+    """Redis消息监听器线程函数"""
+    if not g.redis_pubsub:
+        return
+    
+    print("Redis消息监听器开始运行...")
+    
+    try:
+        for message in g.redis_pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    channel = message['channel']
+                    data = json.loads(message['data'])
+                    
+                    print(f"收到Redis消息 - 频道: {channel}")
+                    
+                    # 处理持仓更新消息
+                    if channel == REDIS_CONFIG['CHANNELS'].get('POSITION_UPDATE'):
+                        handle_position_update_message(data)
+                    # 处理策略更新消息
+                    elif channel == REDIS_CONFIG['CHANNELS'].get('STRATEGY_UPDATE'):
+                        handle_strategy_update_message(data)
+                    # 处理总持仓更新消息
+                    elif channel == REDIS_CONFIG['CHANNELS'].get('TOTAL_POSITIONS_UPDATE'):
+                        handle_total_positions_update_message(data)
+                        
+                except json.JSONDecodeError as e:
+                    print(f"解析Redis消息失败: {e}")
+                except Exception as e:
+                    print(f"处理Redis消息时出错: {e}")
+                    
+    except Exception as e:
+        print(f"Redis监听器异常退出: {e}")
+        g.use_redis_pubsub = False
+
+def handle_position_update_message(data):
+    """处理持仓更新消息"""
+    try:
+        strategy_names = data.get('strategy_names', [])
+        strategy_name = data.get('strategy_name')
+        positions_data = data.get('positions_data', [])
+        update_time = data.get('update_time')
+        
+        # 检查是否是我们关注的策略
+        if not strategy_names or any(name in g.strategy_names for name in strategy_names):
+            print(f"检测到持仓更新: 策略={strategy_names}, 持仓数={len(positions_data)}, 时间={update_time}")
+            
+            # 如果消息包含完整的持仓数据，直接使用Redis数据，无需HTTP请求
+            if positions_data:
+                print(f"  ↳ 从Redis消息获取完整持仓数据: {len(positions_data)} 个持仓")
+                # 更新QMT API对象的缓存
+                if hasattr(g, 'qmt_api') and g.qmt_api:
+                    g.qmt_api.update_cache_from_redis(positions_data, update_time)
+            
+            # 触发同步检查
+            g.latest_update_time = None  # 强制更新
+            
+    except Exception as e:
+        print(f"处理持仓更新消息失败: {e}")
+
+def handle_strategy_update_message(data):
+    """处理策略更新消息"""
+    try:
+        strategy_name = data.get('strategy_name')
+        action = data.get('action')  # 'update', 'delete', 'create'
+        positions_data = data.get('positions_data', [])
+        update_time = data.get('update_time')
+        
+        if strategy_name in g.strategy_names:
+            print(f"检测到策略更新: {strategy_name} - {action}")
+            
+            # 如果包含持仓数据，直接使用Redis数据
+            if positions_data and action == 'update':
+                print(f"  ↳ 从Redis消息获取策略持仓数据: {len(positions_data)} 个持仓")
+                if hasattr(g, 'qmt_api') and g.qmt_api:
+                    g.qmt_api.update_cache_from_redis(positions_data, update_time)
+            
+            # 清除本地缓存的更新时间，强制下次同步
+            g.latest_update_time = None
+            
+    except Exception as e:
+        print(f"处理策略更新消息失败: {e}")
+
+def handle_total_positions_update_message(data):
+    """处理总持仓更新消息"""
+    try:
+        strategy_names = data.get('strategy_names', [])
+        include_adjustments = data.get('include_adjustments', True)
+        positions_data = data.get('positions_data', [])
+        update_time = data.get('update_time')
+        
+        # 检查是否与我们关注的策略相关
+        if not strategy_names or any(name in g.strategy_names for name in strategy_names):
+            print(f"检测到总持仓更新: 策略={strategy_names}, 调整策略={include_adjustments}, 持仓数={len(positions_data)}")
+            
+            # 直接使用Redis中的完整总持仓数据
+            if positions_data:
+                print(f"  ↳ 从Redis消息获取完整总持仓数据: {len(positions_data)} 个持仓")
+                # 更新QMT API对象的缓存
+                if hasattr(g, 'qmt_api') and g.qmt_api:
+                    g.qmt_api.update_cache_from_redis(positions_data, update_time)
+                
+                # 触发立即同步检查（基于Redis数据）
+                g.latest_update_time = None
+            
+    except Exception as e:
+        print(f"处理总持仓更新消息失败: {e}")
+
+def stop_redis_subscriber():
+    """停止Redis订阅"""
+    try:
+        if g.redis_pubsub:
+            g.redis_pubsub.unsubscribe()
+            g.redis_pubsub.close()
+            g.redis_pubsub = None
+            
+        if g.redis_listener_thread and g.redis_listener_thread.is_alive():
+            g.redis_listener_thread.join(timeout=5)
+            
+        g.use_redis_pubsub = False
+        print("Redis订阅已停止")
+        
+    except Exception as e:
+        print(f"停止Redis订阅时出错: {e}")
+
+
+class QMTAPI:
+    def __init__(self, C, strategy_names=None):
+        self.api_url = API_URL
+        self.C = C
+        self.strategy_names = strategy_names
+        self._cached_positions = None
+        self._cache_time = None
+        self._cache_timeout = 30  # 缓存超时时间（秒）
+    
+    def get_total_positions(self) -> Dict:
+        """获取总持仓数据，支持Redis pub/sub优化"""
+        
+        # 如果启用了Redis pub/sub且没有收到更新通知，使用缓存
+        if g.use_redis_pubsub and self._cached_positions and self._cache_time:
+            cache_age = (datetime.now() - self._cache_time).total_seconds()
+            if cache_age < self._cache_timeout:
+                print(f"使用Redis缓存的持仓数据 (缓存时间: {cache_age:.1f}秒)")
+                return self._cached_positions
+        
+        # 从服务器获取数据
+        positions_data = self._fetch_positions_from_server()
+        
+        # 更新缓存
+        if positions_data['positions'] or positions_data['update_time']:
+            self._cached_positions = positions_data
+            self._cache_time = datetime.now()
+            
+        return positions_data
+    
+    def update_cache_from_redis(self, positions_data, update_time):
+        """从Redis消息更新缓存"""
+        self._cached_positions = {
+            'positions': positions_data,
+            'update_time': update_time
+        }
+        self._cache_time = datetime.now()
+        print(f"从Redis消息更新持仓缓存: {len(positions_data)} 个持仓")
+    
+    def _fetch_positions_from_server(self) -> Dict:
+        """从服务器获取持仓数据"""
+        try:
+            url = f'{self.api_url}/api/v1/positions/total'
+            if self.strategy_names:
+                url += f'?strategies={",".join(self.strategy_names)}'
+                
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                print(f'获取总持仓失败: HTTP {response.status_code} - {response.text}')
+                return {'positions': [], 'update_time': None}
+            data = response.json()
+            
+            print(f"从服务器获取持仓数据成功 (策略: {self.strategy_names})")
+            return {
+                'positions': data['positions'],
+                'update_time': data.get('update_time')
+            }
+        except requests.exceptions.Timeout:
+            print(f'获取总持仓超时')
+            return {'positions': [], 'update_time': None}
+        except requests.exceptions.RequestException as e:
+            print(f'获取总持仓网络错误: {str(e)}')
+            return {'positions': [], 'update_time': None}
+        except Exception as e:
+            print(f'获取总持仓其他错误: {str(e)}')
+            return {'positions': [], 'update_time': None}
+    
+    def invalidate_cache(self):
+        """清除缓存，强制下次请求从服务器获取数据"""
+        self._cached_positions = None
+        self._cache_time = None
+        print("持仓数据缓存已清除")
+
+    def sync_positions(self, account: str):
+        # 获取最新数据和更新时间
+        total_data = self.get_total_positions()
+        current_update_time = total_data.get('update_time')
+        
+        # 检查是否获取到有效数据
+        if current_update_time is None:
+            print("获取持仓数据失败，跳过本次同步")
+            return
+    
+        # 在Redis pub/sub模式下，如果没有接收到更新通知且时间未变化，跳过同步
+        if g.use_redis_pubsub and g.latest_update_time and current_update_time == g.latest_update_time:
+            print("Redis pub/sub模式: 数据未更新，跳过同步")
+            return
+        
+        # 检查是否需要更新（HTTP轮询模式的逻辑保持不变）
+        if not g.use_redis_pubsub and g.latest_update_time and current_update_time == g.latest_update_time:
+            return
+
+        print(f"\n=== 开始持仓同步 (模式: {'Redis pub/sub' if g.use_redis_pubsub else 'HTTP轮询'}) ===")
+        max_sync_positions = 10
+        while max_sync_positions > 0:
+            max_sync_positions -= 1
+            max_orders_complete_retry = 10  # 添加最大重试次数
+            status = WaitngOrderStatus.ERROR
+            while max_orders_complete_retry > 0:
+                max_orders_complete_retry -= 1
+                # 检查是否需要取消订单
+                status = self.try_orders_complete()
+                if status == WaitngOrderStatus.COMPLETED:
+                    break
+                elif status == WaitngOrderStatus.NEED_REPLACE:
+                    print(f"有订单撤销，等待待撤订单状态更新,等待{g.check_orders_interval}秒后重试...")
+                    continue                   
+                elif status == WaitngOrderStatus.PENDING_CANCEL:
+                    print(f"等待未报和待撤订单状态更新,等待{g.check_orders_interval}秒后重试...")
+                    continue
+                elif status == WaitngOrderStatus.ERROR:
+                    print("检查订单状态时发生错误，跳过本次同步")
+                    break
+            if status != WaitngOrderStatus.ERROR and max_orders_complete_retry > 0:       
+                differences = self.check_positions_consistency(account)
+                print(f"\n=== 同步下单:{10 - max_sync_positions} ===")
+                # 将差异分为卖出和买入两组
+                sell_orders = {}
+                buy_orders = {}
+                for code, info in differences.items():
+                    diff = info['diff']
+                    available = info['available']
+                    if diff > 0:  # 需要卖出
+                        if available >= diff:
+                            sell_orders[code] = {
+                                'volume': diff,
+                                'available': available
+                            }
+                        else:
+                            print(f"  ! 卖出检查失败 {code}: 需要卖出 {diff} 股，但可用仅有 {available} 股")
+                    else:  # 需要买入
+                        buy_orders[code] = {
+                            'volume': abs(diff)
+                        }
+                if sell_orders:
+                    t_orders = sell_orders
+                    direction = 'sell'
+                else:
+                    t_orders = buy_orders
+                    direction = 'buy'
+                if t_orders:
+                    for code, info in t_orders.items():
+                        if direction == "sell":
+                            print(f"  - 卖出 {code}: {info['volume']} 股")
+                            self._place_order(code, info['volume'], 'sell')
+                        else:
+                            print(f"  + 买入 {code}: {info['volume']} 股")
+                            self._place_order(code, info['volume'], 'buy')
+                    print("\n=== 同步下单结束 ===")
+                else:
+                    print("\n=== 同步下单结束，没有下单 ===")
+                    break
+
+        if max_sync_positions == 0:
+            print("达到最大同步次数，跳过本次同步，请检查同步是否完成!!!!")
+        g.latest_update_time = current_update_time
+        print(f"=== 持仓同步结束 (更新时间: {g.latest_update_time}) ===\n")
+
+
+    def try_orders_complete(self):
+        print("\n*** 订单状态检查 ***")
+        time.sleep(g.check_orders_interval)
+        # 获取所有委托        
+        orders = get_trade_detail_data(g.account, 'STOCK', 'ORDER', g.strategy_name)
+        orders = [
+            order for order in orders 
+            if order.m_nOrderStatus not in [56, 57,  53, 54]  # 已成，废单，部撤，已撤
+        ]
+        print("\n当前所有订单状态：")
+        print(f"{'订单编号':<12} {'代码':<10} {'名称':<8} {'方向':<6} {'总数量':>8} {'成交量':>8} "
+              f"{'价格':>8} {'状态':>6} {'备注':<20}")
+        print("-" * 90)
+        for order in orders:
+            direction = "买入" if order.m_nOffsetFlag == 48 else "卖出"
+            print(f"{order.m_strOrderSysID:<12} {order.m_strInstrumentID:<10} "
+                  f"{order.m_strInstrumentName[:8]:<8} {direction:<6} "
+                  f"{order.m_nVolumeTotalOriginal:>8} {order.m_nVolumeTraded:>8} "
+                  f"{order.m_dLimitPrice:>8.2f} {order.m_nOrderStatus:>6} "
+                  f"{order.m_strRemark[:20]:<20}")
+        if not orders:
+            print("没有未完成订单")
+            return WaitngOrderStatus.COMPLETED
+        
+        # 先检查是否有待交易所处理的订单
+        pending_orders = [
+            order for order in orders 
+            if order.m_nOrderStatus in [49, 51, 52]  # 待报、已报待撤、部成待撤
+        ]
+        if pending_orders:
+            print("存在待交易所处理的订单，等待处理完成")
+            for order in pending_orders:
+                print(f"  - {order.m_strOrderSysID}: 状态{order.m_nOrderStatus}")
+            return WaitngOrderStatus.PENDING_CANCEL
+
+        # 需要取消的状态列表
+        cancel_states = [50, 55]  # 待报、已报、部成
+        
+        # 筛选需要取消的委托，排除申购订单
+        orders_to_cancel = [
+            order for order in orders 
+            if order.m_nOrderStatus in cancel_states
+        ]
+        if not orders_to_cancel:  # 添加这个判断
+            print("没有需要撤销的订单, 可能有异常状态的订单")
+            return WaitngOrderStatus.ERROR
+
+        has_cancelled = False  # 标记是否有已撤单待重新下单的订单
+
+        for order in orders_to_cancel:
+            print(f"正在撤销订单: {order.m_strOrderSysID} - "
+                    f"{order.m_strInstrumentID} "
+                    f"(状态: {order.m_nOrderStatus})")
+            
+            # 记录未完成数量和方向
+            remaining_volume = order.m_nVolumeTotalOriginal - order.m_nVolumeTraded
+            direction = "buy" if order.m_nOffsetFlag == 48 else "sell"
+            "sell"
+            print(f"订单剩余数量: {remaining_volume} 股 (总量: {order.m_nVolumeTotalOriginal}, "
+                  f"已成交: {order.m_nVolumeTraded}), 方向: {direction}")
+            # 执行撤单
+            if cancel(order.m_strOrderSysID, g.account, 'STOCK', self.C):
+                print(f"撤销成功:{order.m_strOrderSysID}")
+                has_cancelled = True
+            else:
+                print(f"撤销订单失败: {order.m_strOrderSysID}")
+                return WaitngOrderStatus.ERROR
+        if has_cancelled:
+            print("已撤销部分订单，等待重新下单")
+            return WaitngOrderStatus.NEED_REPLACE
+        else:
+            print("发现异常状态的订单")
+            return WaitngOrderStatus.ERROR
+
+    def _should_filter_position(self, code: str):
+        """判断是否应该过滤该持仓
+        过滤条件：
+        1. 逆回购：代码以1、2、3开头的回购品种
+        2. 港股通：代码以00、03开头的港股
+        3. 打新中的新股：代码以787、300开头的新股申购
+        
+        返回：(是否过滤, 过滤原因)
+        """
+        pure_code = self._get_pure_code(code)
+        
+        # 逆回购过滤：上交所逆回购(204xxx)、深交所逆回购(131xxx)
+        if pure_code.startswith(('204', '131')):
+            return True, "逆回购"
+            
+        # 港股通过滤：港股代码通常以00、03开头
+        if pure_code.startswith(('00', '03')) and len(pure_code) == 5:
+            return True, "港股通"
+            
+        # 打新过滤：科创板新股申购(787xxx)、创业板新股申购(300xxx的特定范围)
+        if pure_code.startswith('787'):
+            return True, "科创板新股申购"
+            
+        # 沪市新股申购(730xxx)、深市新股申购(003xxx)
+        if pure_code.startswith(('730')):
+            return True, "新股申购"
+            
+        return False, ""
+
+    def check_positions_consistency(self, account: str) -> Dict[str, Dict]:
+        # 获取数据库目标持仓
+        db_positions = {
+            self._convert_jq_code_to_qmt(pos['code']): pos['total_volume']
+            for pos in self.get_total_positions()['positions']  # 修改这里以适应新的返回格式
+        }
+        
+        # 获取QMT实际持仓
+        qmt_positions = get_trade_detail_data(account, 'STOCK', 'POSITION')
+        current_positions = {
+            f"{p.m_strInstrumentID}.{p.m_strExchangeID}": {
+                'volume': p.m_nVolume,
+                'available': p.m_nCanUseVolume
+            }
+            for p in qmt_positions
+        }
+        
+        # 记录过滤的持仓
+        filtered_db_codes = []
+        filtered_current_codes = []
+        
+        # 过滤不需要对比的持仓
+        filtered_db_positions = {}
+        for code, volume in db_positions.items():
+            should_filter, reason = self._should_filter_position(code)
+            if should_filter:
+                filtered_db_codes.append((code, reason, volume))
+            else:
+                filtered_db_positions[code] = volume
+        
+        filtered_current_positions = {}
+        for code, info in current_positions.items():
+            should_filter, reason = self._should_filter_position(code)
+            if should_filter:
+                filtered_current_codes.append((code, reason, info['volume']))
+            else:
+                filtered_current_positions[code] = info
+        
+        # 打印过滤信息
+        if filtered_db_codes or filtered_current_codes:
+            print(f"\n=== 过滤的持仓 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===")
+            
+            if filtered_db_codes:
+                print("\n【远程持仓（数据库目标持仓）】")
+                print(f"{'代码':<12} {'过滤原因':<12} {'数量':>8}")
+                print("-" * 35)
+                for code, reason, volume in sorted(filtered_db_codes):
+                    print(f"{code:<12} {reason:<12} {volume:>8}")
+            
+            if filtered_current_codes:
+                print("\n【本地持仓（QMT实际持仓）】")
+                print(f"{'代码':<12} {'过滤原因':<12} {'数量':>8}")
+                print("-" * 35)
+                for code, reason, volume in sorted(filtered_current_codes):
+                    print(f"{code:<12} {reason:<12} {volume:>8}")
+            
+            print("\n=== 过滤结束 ===\n")
+        
+        # 计算差异
+        differences = {}
+        all_codes = set(filtered_db_positions.keys()) | set(filtered_current_positions.keys())
+        
+        for code in all_codes:
+            target_vol = filtered_db_positions.get(code, 0)
+            current_pos = filtered_current_positions.get(code, {'volume': 0, 'available': 0})
+            diff = current_pos['volume'] - target_vol
+            
+            if diff != 0:
+                differences[code] = {
+                    'target': target_vol,
+                    'current': current_pos['volume'],
+                    'available': current_pos['available'],
+                    'diff': diff
+                }
+        
+        # 打印差异
+        print(f"\n=== Position Differences ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===")
+        if differences:
+            print(f"{'Code':<10} {'Target':>8} {'Current':>8} {'Diff':>8}")
+            print("-" * 38)
+            for code, info in sorted(differences.items()):
+                print(f"{code:<10} {info['target']:>8} {info['current']:>8} {info['diff']:>8}")
+        else:
+            print("  √ All positions are consistent")
+        print("=== Check End ===\n")
+        
+        return differences
+    
+    def _convert_jq_code_to_qmt(self, jq_code: str) -> str:
+        """将聚宽代码转换为QMT代码
+        511260.XSHG -> 511260.SH
+        511260.XSHE -> 511260.SZ
+        """
+        if '.' not in jq_code:
+            return jq_code
+        
+        code, market = jq_code.split('.')
+        if market == 'XSHG':
+            return f"{code}.SH"
+        elif market == 'XSHE':
+            return f"{code}.SZ"
+        return jq_code
+    
+    def _convert_qmt_position_to_full_code(self, code: str, market: str) -> str:
+        """将持仓代码和市场转换为完整QMT代码
+        code: 600000, market: SH -> 600000.SH
+        """
+        return f"{code}.{market}"
+    
+    def _get_pure_code(self, full_code: str) -> str:
+        """从完整代码中获取纯数字代码
+        600000.SH -> 600000
+        """
+        return full_code.split('.')[0]
+    
+    def _is_fund(self, code: str) -> bool:
+        """判断是否为基金
+        基金代码规则：
+        - ETF基金：51开头（上交所）、15开头（深交所）
+        - LOF基金：16开头（深交所）
+        - 货币基金：511开头（上交所）、519开头（深交所）
+        """
+        pure_code = self._get_pure_code(code)
+        return pure_code.startswith(('51', '15', '16', '519'))
+    
+    def _get_price_precision(self, code: str) -> int:
+        """获取价格精度
+        基金：3位小数（0.001）
+        股票：2位小数（0.01）
+        """
+        return 3 if self._is_fund(code) else 2
+
+    def _place_order(self, code: str, volume: int, direction: str, retry = 0):
+        """执行QMT实际下单"""
+
+        # 使用完整QMT代码获取行情
+        # 使用完整QMT代码获取行情
+        try:
+            tick_data_dict = self.C.get_full_tick([code])
+            if not tick_data_dict or code not in tick_data_dict:
+                print(f"获取 {code} 行情数据失败, tick_data_dict={tick_data_dict}")
+                return
+            
+            tick_data = tick_data_dict[code]
+            if not tick_data or 'lastPrice' not in tick_data or tick_data['lastPrice'] <= 0:
+                print(f"获取 {code} 最新价失败, tick_data={tick_data}")
+                return
+            
+            price = tick_data['lastPrice']
+            # 获取买卖二价，如果没有第二档价格则使用0
+            ask_price2 = tick_data['askPrice'][1] if ('askPrice' in tick_data and len(tick_data['askPrice']) > 1) else 0
+            bid_price2 = tick_data['bidPrice'][1] if ('bidPrice' in tick_data and len(tick_data['bidPrice']) > 1) else 0
+            
+        except Exception as e:
+            print(f"获取 {code} 行情异常: {str(e)}")
+            return
+        # 从完整代码中提取纯代码
+        pure_code = self._get_pure_code(code)
+        data = self.C.get_instrumentdetail(code)
+        if data["InstrumentStatus"] > 0:
+            print(f"股票 {code} 停牌，无法下单")
+            return
+        if price == data["UpStopPrice"] and direction == 'buy':
+            print(f"股票 {code} 达到涨停价格，无法下买单")
+            return
+        if price == data["DownStopPrice"] and direction == 'sell':
+            print(f"股票 {code} 达到跌停价格，无法下卖单")
+            return
+            
+        # 获取价格精度
+        precision = self._get_price_precision(code)
+        # 根据买卖方向设置价格偏移和操作类型
+        if direction == 'buy':
+            calculated_price = min(round(price * 1.002, precision), data["UpStopPrice"])  # 买单价格加0.2%
+            # 如果卖二价格有效且优于计算价格，使用卖二价格
+            if ask_price2 > 0 and ask_price2 < calculated_price:
+                order_price = ask_price2
+                print(f"使用卖二价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
+            else:
+                order_price = calculated_price
+                print(f"使用计算价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
+            op_type = 23  # 买入
+        else:
+            calculated_price = max(round(price * 0.998, precision), data["DownStopPrice"])  # 卖单价格减0.2%
+            # 如果买二价格有效且优于计算价格，使用买二价格
+            if bid_price2 > 0 and bid_price2 > calculated_price:
+                order_price = bid_price2
+                print(f"使用买二价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
+            else:
+                order_price = calculated_price
+                print(f"使用计算价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
+            op_type = 24  # 卖出
+        
+        user_order_id = f"{retry}_{datetime.now()}"
+        # 执行下单
+        passorder(
+            op_type,                # 操作类型：1买入，2卖出
+            1101,                   # 组合方式
+            g.account,              # 资金账号
+            code,                   # 股票代码
+            11,                     # 报价类型：限价单
+            order_price,            # 委托价格
+            volume,                 # 下单数量
+            g.strategy_name,        # 策略名称
+            2,                      # 快速下单标记
+            user_order_id,          # 投资备注
+            self.C                  # 策略上下文
+        )
+        
+        print(f'下单成功: {code}, {"买入" if direction == "buy" else "卖出"}, {volume} 股, 价格 {order_price}')
+            
+
+# 全局变量存储调度任务
+scheduled_tasks = {}
+task_counter = 0
+
+# 全局定时器回调函数
+def global_timer_callback(ContextInfo):
+    """全局定时器回调函数，检查所有待执行的任务"""
+    current_time = datetime.now()
+    tasks_to_remove = []
+    
+    # 创建字典的副本来避免迭代时修改字典
+    tasks_snapshot = dict(scheduled_tasks)
+    
+    for task_id, task_info in tasks_snapshot.items():
+        # 检查任务是否仍然存在（可能已被其他地方删除）
+        if task_id not in scheduled_tasks:
+            continue
+            
+        if not task_info['executed'] and current_time >= task_info['target_time']:
+            # 在原字典中标记为已执行
+            if task_id in scheduled_tasks:
+                scheduled_tasks[task_id]['executed'] = True
+            
+            try:
+                task_info['func'](ContextInfo)
+            except Exception as e:
+                print(f"执行调度任务时发生错误: {e}")
+            finally:
+                tasks_to_remove.append(task_id)
+    
+    # 清理已执行的任务
+    for task_id in tasks_to_remove:
+        if task_id in scheduled_tasks:
+            del scheduled_tasks[task_id]
+
+def schedule_run(ContextInfo, func, target_time):
+    """
+    调度函数在指定时间执行
+    优先使用原生的 ContextInfo.schedule_run，如果不存在则使用自定义实现
+    
+    参数:
+    ContextInfo: 策略上下文对象
+    func: 要调度的函数
+    target_time: 目标执行时间 (datetime对象)
+    """
+    # 检查是否存在原生的 schedule_run 方法
+    if hasattr(ContextInfo, 'schedule_run') and callable(getattr(ContextInfo, 'schedule_run')):
+        # 使用原生的 schedule_run 方法
+        try:
+            return ContextInfo.schedule_run(func, target_time)
+        except Exception as e:
+            print(f"使用原生 schedule_run 失败，切换到自定义实现: {e}")
+            # 如果原生方法失败，继续使用自定义实现
+    
+    # 使用自定义实现
+    global task_counter
+    task_counter += 1
+    task_id = f"task_{task_counter}"
+    
+    # 存储任务信息
+    scheduled_tasks[task_id] = {
+        'func': func,
+        'target_time': target_time,
+        'executed': False
+    }
+    
+    # 如果这是第一个任务，启动全局定时器
+    if len(scheduled_tasks) == 1:
+        # 使用100毫秒间隔检查任务，提高精度
+        start_time = (datetime.now() - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+        ContextInfo.run_time('global_timer_callback', '100nMilliSecond', start_time)
+    
+    return task_id
+
+def cancel_scheduled_task(task_id):
+    """取消已调度的任务"""
+    if task_id in scheduled_tasks:
+        del scheduled_tasks[task_id]
+        return True
+    return False
+
+DEBUG = False
+
+# 修改原有的adjust函数
+def adjust(ContextInfo):
+    now = datetime.now()
+    current_time = now.time()
+    is_trading_time = (
+        current_time >= datetime.strptime("09:15:00", "%H:%M:%S").time() and 
+        current_time <= datetime.strptime("15:00:00", "%H:%M:%S").time()
+    )
+    is_trading_time = True
+    
+    if is_trading_time or DEBUG:
+        # 在交易时间内，执行同步操作
+        api = QMTAPI(ContextInfo, g.strategy_names)
+        
+        # 将API对象存储在全局变量中，供Redis消息处理使用
+        g.qmt_api = api
+        
+        api.sync_positions(g.account)
+        
+        # 根据Redis pub/sub状态调整下次运行间隔
+        if g.use_redis_pubsub:
+            # Redis pub/sub模式：降低轮询频率，因为会通过消息通知
+            sync_interval = max(g.sync_positions_interval * 3, 15)  # 至少15秒
+            print(f"Redis pub/sub模式：下次同步间隔设置为 {sync_interval} 秒")
+        else:
+            # HTTP轮询模式：使用原有间隔
+            sync_interval = g.sync_positions_interval
+            print(f"HTTP轮询模式：下次同步间隔设置为 {sync_interval} 秒")
+            
+        next_run = now + timedelta(seconds=sync_interval)
+    else:
+        # 非交易时间，安排明天9:30运行
+        next_run = (now + timedelta(days=1)).replace(
+            hour=9, minute=30, second=0, microsecond=0
+        )
+    
+    # 安排下一次运行
+    schedule_run(ContextInfo, adjust, next_run)
+
+def init(ContextInfo):
+    g.account = account
+    print(f"!!!!当前监控策略:{g.strategy_names}")
+    
+    # 初始化Redis连接和订阅
+    print("\n=== 初始化Redis连接 ===")
+    if init_redis_connection():
+        if start_redis_subscriber():
+            print("✓ Redis pub/sub模式已启用，将减少HTTP请求频率")
+        else:
+            print("! Redis连接成功但订阅启动失败，使用HTTP轮询模式")
+    else:
+        print("! Redis连接失败，使用HTTP轮询模式")
+    
+    # 计算今天的9:30
+    now = datetime.now()
+    current_time = now.time()
+    if current_time <= datetime.strptime("15:00:00", "%H:%M:%S").time() or DEBUG:
+        g.first_run = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    else:
+        g.first_run = now.replace(hour=9, minute=15, second=0, microsecond=0) + timedelta(days=1)
+    print(f"设置第一次运行时间:{g.first_run}")
+    # 设置调度，从first_run开始运行
+    schedule_run(ContextInfo, adjust, g.first_run)
