@@ -163,19 +163,19 @@ def handle_position_update_message(data):
     try:
         strategy_names = data.get('strategy_names', [])
         strategy_name = data.get('strategy_name')
-        positions_data = data.get('positions_data', [])
+        positions = data.get('positions', [])
         update_time = data.get('update_time')
         
         # 检查是否是我们关注的策略
         if not strategy_names or any(name in g.strategy_names for name in strategy_names):
-            print(f"检测到持仓更新: 策略={strategy_names}, 持仓数={len(positions_data)}, 时间={update_time}")
+            print(f"检测到持仓更新: 策略={strategy_names}, 持仓数={len(positions)}, 时间={update_time}")
             
             # 如果消息包含完整的持仓数据，直接使用Redis数据，无需HTTP请求
-            if positions_data:
-                print(f"  ↳ 从Redis消息获取完整持仓数据: {len(positions_data)} 个持仓")
+            if positions:
+                print(f"  ↳ 从Redis消息获取完整持仓数据: {len(positions)} 个持仓")
                 # 更新QMT API对象的缓存
                 if hasattr(g, 'qmt_api') and g.qmt_api:
-                    g.qmt_api.update_cache_from_redis(positions_data, update_time)
+                    g.qmt_api.update_cache_from_redis(positions, update_time)
             
             # 触发同步检查
             g.latest_update_time = None  # 强制更新
@@ -188,17 +188,17 @@ def handle_strategy_update_message(data):
     try:
         strategy_name = data.get('strategy_name')
         action = data.get('action')  # 'update', 'delete', 'create'
-        positions_data = data.get('positions_data', [])
+        positions = data.get('positions', [])
         update_time = data.get('update_time')
         
         if strategy_name in g.strategy_names:
             print(f"检测到策略更新: {strategy_name} - {action}")
             
             # 如果包含持仓数据，直接使用Redis数据
-            if positions_data and action == 'update':
-                print(f"  ↳ 从Redis消息获取策略持仓数据: {len(positions_data)} 个持仓")
+            if positions and action == 'update':
+                print(f"  ↳ 从Redis消息获取策略持仓数据: {len(positions)} 个持仓")
                 if hasattr(g, 'qmt_api') and g.qmt_api:
-                    g.qmt_api.update_cache_from_redis(positions_data, update_time)
+                    g.qmt_api.update_cache_from_redis(positions, update_time)
             
             # 清除本地缓存的更新时间，强制下次同步
             g.latest_update_time = None
@@ -211,19 +211,19 @@ def handle_total_positions_update_message(data):
     try:
         strategy_names = data.get('strategy_names', [])
         include_adjustments = data.get('include_adjustments', True)
-        positions_data = data.get('positions_data', [])
+        positions = data.get('positions', [])
         update_time = data.get('update_time')
         
         # 检查是否与我们关注的策略相关
         if not strategy_names or any(name in g.strategy_names for name in strategy_names):
-            print(f"检测到总持仓更新: 策略={strategy_names}, 调整策略={include_adjustments}, 持仓数={len(positions_data)}")
+            print(f"检测到总持仓更新: 策略={strategy_names}, 调整策略={include_adjustments}, 持仓数={len(positions)}")
             
             # 直接使用Redis中的完整总持仓数据
-            if positions_data:
-                print(f"  ↳ 从Redis消息获取完整总持仓数据: {len(positions_data)} 个持仓")
+            if positions:
+                print(f"  ↳ 从Redis消息获取完整总持仓数据: {len(positions)} 个持仓")
                 # 更新QMT API对象的缓存
                 if hasattr(g, 'qmt_api') and g.qmt_api:
-                    g.qmt_api.update_cache_from_redis(positions_data, update_time)
+                    g.qmt_api.update_cache_from_redis(positions, update_time)
                 
                 # 触发立即同步检查（基于Redis数据）
                 g.latest_update_time = None
@@ -269,23 +269,23 @@ class QMTAPI:
                 return self._cached_positions
         
         # 从服务器获取数据
-        positions_data = self._fetch_positions_from_server()
+        positions = self._fetch_positions_from_server()
         
         # 更新缓存
-        if positions_data['positions'] or positions_data['update_time']:
-            self._cached_positions = positions_data
+        if positions['positions'] or positions['update_time']:
+            self._cached_positions = positions
             self._cache_time = datetime.now()
             
-        return positions_data
+        return positions
     
-    def update_cache_from_redis(self, positions_data, update_time):
+    def update_cache_from_redis(self, positions, update_time):
         """从Redis消息更新缓存"""
         self._cached_positions = {
-            'positions': positions_data,
+            'positions': positions,
             'update_time': update_time
         }
         self._cache_time = datetime.now()
-        print(f"从Redis消息更新持仓缓存: {len(positions_data)} 个持仓")
+        print(f"从Redis消息更新持仓缓存: {len(positions)} 个持仓")
     
     def _fetch_positions_from_server(self) -> Dict:
         """从服务器获取持仓数据"""

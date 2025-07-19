@@ -144,7 +144,7 @@ def publish_position_update_message(strategy_name, positions):
             'strategy_name': strategy_name,
             'strategy_names': [strategy_name],  # 兼容QMT端的处理逻辑
             'positions_count': len(positions),
-            'positions_data': positions,  # 包含完整的持仓数据
+            'positions': positions,  # 包含完整的持仓数据
             'update_time': datetime.now().isoformat(),
             'timestamp': datetime.now().timestamp()
         }
@@ -156,7 +156,7 @@ def publish_position_update_message(strategy_name, positions):
         strategy_message = {
             'action': 'update',
             'strategy_name': strategy_name,
-            'positions_data': positions,  # 策略更新消息也包含持仓数据
+            'positions': positions,  # 策略更新消息也包含持仓数据
             'positions_count': len(positions),
             'update_time': datetime.now().isoformat(),
             'timestamp': datetime.now().timestamp()
@@ -194,7 +194,7 @@ def publish_total_positions_update(strategy_names=None, include_adjustments=True
             'action': 'total_positions_update',
             'strategy_names': strategy_names if strategy_names else [],
             'include_adjustments': include_adjustments,
-            'positions_data': total_data['positions'],  # 包含完整的总持仓数据
+            'positions': total_data['positions'],  # 包含完整的总持仓数据
             'positions_count': len(total_data['positions']),
             'update_time': total_data['update_time'].isoformat() if total_data['update_time'] else None,
             'timestamp': datetime.now().timestamp()
