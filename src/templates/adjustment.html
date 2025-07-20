@@ -241,7 +241,7 @@
         
         async function loadAdjustments() {
             try {
-                const response = await fetch('/api/v1/positions/strategy/ADJUSTMENT_MAIN');
+                const response = await fetch('/api/v1/positions/strategy/ADJUSTMENT_MAIN/web');
                 if (response.ok) {
                     const data = await response.json();
                     adjustments = data.positions || [];

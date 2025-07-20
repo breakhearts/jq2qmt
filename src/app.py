@@ -2,7 +2,7 @@ import os
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from models.models import db, StrategyPosition, InternalPasswordManager, User, init_redis
+from models.models import db, StrategyPosition, InternalPasswordManager, User, UserStrategy, init_redis
 from config import SQLALCHEMY_DATABASE_URI, API_HOST, API_PORT, CRYPTO_AUTH_CONFIG, REDIS_CONFIG
 from auth.simple_crypto_auth import SimpleCryptoAuth, require_auth
 import auth.simple_crypto_auth as auth_module
@@ -316,9 +316,76 @@ def set_internal_password():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/v1/user/password/change', methods=['POST'])
+@web_login_required
+def change_user_password():
+    """用户修改自己的密码"""
+    try:
+        data = request.get_json()
+        if not data or 'current_password' not in data or 'new_password' not in data:
+            return jsonify({'error': '缺少当前密码或新密码'}), 400
+        
+        current_password = data['current_password']
+        new_password = data['new_password']
+        
+        if len(new_password) < 6:
+            return jsonify({'error': '密码长度至少6位'}), 400
+        
+        # 获取当前用户名
+        if hasattr(app, 'has_flask_login') and app.has_flask_login:
+            try:
+                username = current_user.username
+            except:
+                username = session.get('user_id')
+        else:
+            username = session.get('user_id')
+        
+        if not username:
+            return jsonify({'error': '用户未登录'}), 401
+        
+        # 验证当前密码
+        user = User.authenticate_user(username, current_password)
+        if not user:
+            return jsonify({'error': '当前密码错误'}), 401
+        
+        # 修改密码
+        user_obj = User.query.filter_by(username=username).first()
+        if user_obj:
+            user_obj.password_hash = User.hash_password(new_password)
+            db.session.commit()
+            return jsonify({
+                'message': '密码修改成功',
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+        else:
+            return jsonify({'error': '用户不存在'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/v1/positions/strategy/<strategy_name>', methods=['GET'])
 def get_strategy_positions(strategy_name):
     try:
+        username = request.args.get('username')
+        password = request.args.get('password')
+        if not username or not password:
+            return jsonify({'error': '缺少用户名或密码'}), 401
+
+        # 校验用户
+        user = User.authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': '用户名或密码错误'}), 401
+
+        # 检查用户是否有权限访问该策略
+        if not user.is_superuser:
+            if not UserStrategy.check_user_strategy_permission(user.id, strategy_name):
+                return jsonify({
+                    'error': f'您没有查看策略 "{strategy_name}" 的权限'
+                }), 403
+            
+            # 增加请求计数
+            UserStrategy.increment_request_count(user.id, [strategy_name])
+
         strategy = StrategyPosition.query.filter_by(strategy_name=strategy_name).first()
         if strategy:
             return jsonify({
@@ -328,12 +395,87 @@ def get_strategy_positions(strategy_name):
                     'volume': position['volume'],
                     'cost': position['cost']
                 } for position in strategy.positions],
-                'update_time': strategy.update_time.strftime('%Y-%m-%d %H:%M:%S') if strategy.update_time else None
+                'update_time': strategy.update_time.strftime('%Y-%m-%d %H:%M:%S') if strategy.update_time else None,
+                'user_info': {
+                    'username': username,
+                    'is_superuser': user.is_superuser,
+                    'strategy_name': strategy_name
+                }
             })
         else:
             return jsonify({
                 'positions': [],
-                'update_time': None
+                'update_time': None,
+                'user_info': {
+                    'username': username,
+                    'is_superuser': user.is_superuser,
+                    'strategy_name': strategy_name
+                }
+            })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/positions/strategy/<strategy_name>/web', methods=['GET'])
+@web_login_required
+def get_strategy_positions_web(strategy_name):
+    """Web页面专用的获取单个策略接口，使用Web会话认证"""
+    try:
+        # 获取当前登录用户
+        if hasattr(app, 'has_flask_login') and app.has_flask_login:
+            try:
+                username = current_user.username
+                is_superuser = current_user.is_superuser
+            except:
+                username = session.get('user_id')
+                user_data = User.get_user_by_username(username)
+                is_superuser = user_data.get('is_superuser', False) if user_data else False
+        else:
+            username = session.get('user_id')
+            user_data = User.get_user_by_username(username)
+            is_superuser = user_data.get('is_superuser', False) if user_data else False
+
+        if not username:
+            return jsonify({'error': '用户未登录'}), 401
+
+        user_data = User.get_user_by_username(username)
+        if not user_data:
+            return jsonify({'error': '用户不存在'}), 404
+
+        # 检查用户是否有权限访问该策略
+        if not is_superuser:
+            if not UserStrategy.check_user_strategy_permission(user_data['id'], strategy_name):
+                return jsonify({
+                    'error': f'您没有查看策略 "{strategy_name}" 的权限'
+                }), 403
+            
+            # 增加请求计数
+            UserStrategy.increment_request_count(user_data['id'], [strategy_name])
+
+        strategy = StrategyPosition.query.filter_by(strategy_name=strategy_name).first()
+        if strategy:
+            return jsonify({
+                'positions': [{
+                    'code': position['code'],
+                    'name': position.get('name', ""),
+                    'volume': position['volume'],
+                    'cost': position['cost']
+                } for position in strategy.positions],
+                'update_time': strategy.update_time.strftime('%Y-%m-%d %H:%M:%S') if strategy.update_time else None,
+                'user_info': {
+                    'username': username,
+                    'is_superuser': is_superuser,
+                    'strategy_name': strategy_name
+                }
+            })
+        else:
+            return jsonify({
+                'positions': [],
+                'update_time': None,
+                'user_info': {
+                    'username': username,
+                    'is_superuser': is_superuser,
+                    'strategy_name': strategy_name
+                }
             })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -341,16 +483,184 @@ def get_strategy_positions(strategy_name):
 @app.route('/api/v1/positions/total', methods=['GET'])
 def get_total_positions():
     try:
+        username = request.args.get('username')
+        password = request.args.get('password')
+        if not username or not password:
+            return jsonify({'error': '缺少用户名或密码'}), 401
+
+        # 校验用户
+        user = User.authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': '用户名或密码错误'}), 401
+
         strategy_names_str = request.args.get('strategies')
-        strategy_names = strategy_names_str.split(',') if strategy_names_str else None
-        
+        requested_strategies = strategy_names_str.split(',') if strategy_names_str else []
+
         # 是否包含调整策略，默认包含
         include_adjustments = request.args.get('include_adjustments', 'true').lower() == 'true'
-        
-        result = StrategyPosition.get_total_positions(strategy_names, include_adjustments)
+
+        # 检查用户策略权限
+        if requested_strategies:
+            # 检查用户是否有权限查看这些策略
+            allowed_strategies = []
+            for strategy_name in requested_strategies:
+                if UserStrategy.check_user_strategy_permission(user.id, strategy_name):
+                    allowed_strategies.append(strategy_name)
+                else:
+                    return jsonify({
+                        'error': f'您没有查看策略 "{strategy_name}" 的权限'
+                    }), 403
+            
+            # 增加请求计数
+            UserStrategy.increment_request_count(user.id, allowed_strategies)
+            
+            # 使用允许的策略获取持仓
+            result = StrategyPosition.get_total_positions(
+                strategy_names=allowed_strategies, 
+                include_adjustments=include_adjustments,
+                user_id=user.id,
+                is_superuser=user.is_superuser
+            )
+        else:
+            # 如果没有指定策略，获取用户所有允许的策略
+            user_strategies = UserStrategy.get_user_strategies(user.id)
+            if not user_strategies:
+                return jsonify({
+                    'error': '您没有查看任何策略的权限，请联系管理员'
+                }), 403
+            
+            allowed_strategy_names = [s['strategy_name'] for s in user_strategies]
+            
+            # 增加请求计数
+            UserStrategy.increment_request_count(user.id, allowed_strategy_names)
+            
+            # 使用用户的所有策略获取持仓
+            result = StrategyPosition.get_total_positions(
+                strategy_names=allowed_strategy_names, 
+                include_adjustments=include_adjustments,
+                user_id=user.id,
+                is_superuser=user.is_superuser
+            )
+
         return jsonify({
             'positions': result['positions'],
-            'update_time': result['update_time'].strftime('%Y-%m-%d %H:%M:%S') if result['update_time'] else None
+            'update_time': result['update_time'].strftime('%Y-%m-%d %H:%M:%S') if result['update_time'] else None,
+            'user_info': {
+                'username': username,
+                'strategies_accessed': len(requested_strategies) if requested_strategies else len([s['strategy_name'] for s in UserStrategy.get_user_strategies(user.id)])
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/positions/total/web', methods=['GET'])
+@web_login_required
+def get_total_positions_web():
+    """Web页面专用的获取总持仓接口，使用Web会话认证"""
+    try:
+        # 获取当前登录用户
+        if hasattr(app, 'has_flask_login') and app.has_flask_login:
+            try:
+                username = current_user.username
+                is_superuser = current_user.is_superuser
+            except:
+                username = session.get('user_id')
+                user_data = User.get_user_by_username(username)
+                is_superuser = user_data.get('is_superuser', False) if user_data else False
+        else:
+            username = session.get('user_id')
+            user_data = User.get_user_by_username(username)
+            is_superuser = user_data.get('is_superuser', False) if user_data else False
+
+        if not username:
+            return jsonify({'error': '用户未登录'}), 401
+
+        user_data = User.get_user_by_username(username)
+        if not user_data:
+            return jsonify({'error': '用户不存在'}), 404
+
+        # 获取策略参数（虽然Web页面通常不传这个参数）
+        strategy_names_str = request.args.get('strategies')
+        requested_strategies = strategy_names_str.split(',') if strategy_names_str else []
+
+        # 是否包含调整策略，默认包含
+        include_adjustments = request.args.get('include_adjustments', 'true').lower() == 'true'
+
+        # 检查用户策略权限
+        if requested_strategies:
+            # 检查用户是否有权限查看这些策略
+            allowed_strategies = []
+            for strategy_name in requested_strategies:
+                if UserStrategy.check_user_strategy_permission(user_data['id'], strategy_name):
+                    allowed_strategies.append(strategy_name)
+                elif not is_superuser:  # 超级用户可以访问任何策略
+                    return jsonify({
+                        'error': f'您没有查看策略 "{strategy_name}" 的权限'
+                    }), 403
+            
+            # 如果是超级用户且有未授权策略，直接使用请求的策略
+            if is_superuser:
+                allowed_strategies = requested_strategies
+            
+            # 增加请求计数（仅对普通用户）
+            if not is_superuser:
+                UserStrategy.increment_request_count(user_data['id'], allowed_strategies)
+            
+            # 使用允许的策略获取持仓
+            result = StrategyPosition.get_total_positions(
+                strategy_names=allowed_strategies, 
+                include_adjustments=include_adjustments,
+                user_id=user_data['id'],
+                is_superuser=is_superuser
+            )
+        else:
+            # 如果没有指定策略，根据用户类型处理
+            if is_superuser:
+                # 超级用户获取所有策略
+                result = StrategyPosition.get_total_positions(
+                    strategy_names=None,  # 获取所有策略
+                    include_adjustments=include_adjustments,
+                    user_id=user_data['id'],
+                    is_superuser=is_superuser
+                )
+            else:
+                # 普通用户获取授权的策略
+                user_strategies = UserStrategy.get_user_strategies(user_data['id'])
+                if not user_strategies:
+                    return jsonify({
+                        'positions': [],
+                        'update_time': None,
+                        'user_info': {
+                            'username': username,
+                            'strategies_accessed': 0,
+                            'message': '您没有查看任何策略的权限，请联系管理员'
+                        }
+                    })
+                
+                allowed_strategy_names = [s['strategy_name'] for s in user_strategies]
+                
+                # 增加请求计数
+                UserStrategy.increment_request_count(user_data['id'], allowed_strategy_names)
+                
+                # 使用用户的所有策略获取持仓
+                result = StrategyPosition.get_total_positions(
+                    strategy_names=allowed_strategy_names,
+                    include_adjustments=include_adjustments,
+                    user_id=user_data['id'],
+                    is_superuser=is_superuser
+                )
+
+        return jsonify({
+            'positions': result['positions'],
+            'update_time': result['update_time'].strftime('%Y-%m-%d %H:%M:%S') if result['update_time'] else None,
+            'user_info': {
+                'username': username,
+                'is_superuser': is_superuser,
+                'strategies_accessed': len(requested_strategies) if requested_strategies else (
+                    len(StrategyPosition.get_all_strategy_positions(user_id=user_data['id'], is_superuser=is_superuser)) if is_superuser 
+                    else len([s['strategy_name'] for s in UserStrategy.get_user_strategies(user_data['id'])])
+                )
+            }
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -358,19 +668,162 @@ def get_total_positions():
 @app.route('/api/v1/positions/all', methods=['GET'])
 def get_all_positions():
     try:
-        positions = StrategyPosition.get_all_strategy_positions()
-        return jsonify({
-            'strategies': [{
-                'strategy_name': item['strategy_name'],
-                'positions': [{
-                    'code': pos['code'],
-                    'name': pos.get('name', ""),
-                    'volume': pos['volume'],
-                    'cost': pos['cost']
-                } for pos in item['positions']],
-                'update_time': item['update_time'].strftime('%Y-%m-%d %H:%M:%S')
-            } for item in positions]
-        })
+        username = request.args.get('username')
+        password = request.args.get('password')
+        if not username or not password:
+            return jsonify({'error': '缺少用户名或密码'}), 401
+
+        # 校验用户
+        user = User.authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': '用户名或密码错误'}), 401
+
+        # 检查是否为超级用户
+        if user.is_superuser:
+            # 超级用户可以访问所有策略
+            positions = StrategyPosition.get_all_strategy_positions(user_id=user.id, is_superuser=True)
+            return jsonify({
+                'strategies': [{
+                    'strategy_name': item['strategy_name'],
+                    'positions': [{
+                        'code': pos['code'],
+                        'name': pos.get('name', ""),
+                        'volume': pos['volume'],
+                        'cost': pos['cost']
+                    } for pos in item['positions']],
+                    'update_time': item['update_time'].strftime('%Y-%m-%d %H:%M:%S')
+                } for item in positions],
+                'user_info': {
+                    'username': username,
+                    'is_superuser': True,
+                    'total_strategies': len(positions)
+                }
+            })
+        else:
+            # 普通用户只能访问授权的策略
+            user_strategies = UserStrategy.get_user_strategies(user.id)
+            if not user_strategies:
+                return jsonify({
+                    'error': '您没有查看任何策略的权限，请联系管理员'
+                }), 403
+            
+            allowed_strategy_names = [s['strategy_name'] for s in user_strategies]
+            
+            # 获取用户可访问的策略持仓（使用权限控制的方法）
+            filtered_positions = StrategyPosition.get_all_strategy_positions(user_id=user.id, is_superuser=False)
+            
+            # 增加请求计数
+            UserStrategy.increment_request_count(user.id, allowed_strategy_names)
+            
+            return jsonify({
+                'strategies': [{
+                    'strategy_name': item['strategy_name'],
+                    'positions': [{
+                        'code': pos['code'],
+                        'name': pos.get('name', ""),
+                        'volume': pos['volume'],
+                        'cost': pos['cost']
+                    } for pos in item['positions']],
+                    'update_time': item['update_time'].strftime('%Y-%m-%d %H:%M:%S')
+                } for item in filtered_positions],
+                'user_info': {
+                    'username': username,
+                    'is_superuser': False,
+                    'authorized_strategies': len(allowed_strategy_names),
+                    'accessible_strategies': len(filtered_positions)
+                }
+            })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/positions/all/web', methods=['GET'])
+@web_login_required
+def get_all_positions_web():
+    """Web页面专用的获取所有策略接口，使用Web会话认证"""
+    try:
+        # 获取当前登录用户
+        if hasattr(app, 'has_flask_login') and app.has_flask_login:
+            try:
+                username = current_user.username
+                is_superuser = current_user.is_superuser
+            except:
+                username = session.get('user_id')
+                user_data = User.get_user_by_username(username)
+                is_superuser = user_data.get('is_superuser', False) if user_data else False
+        else:
+            username = session.get('user_id')
+            user_data = User.get_user_by_username(username)
+            is_superuser = user_data.get('is_superuser', False) if user_data else False
+
+        if not username:
+            return jsonify({'error': '用户未登录'}), 401
+
+        user_data = User.get_user_by_username(username)
+        if not user_data:
+            return jsonify({'error': '用户不存在'}), 404
+
+        # 检查是否为超级用户
+        if is_superuser:
+            # 超级用户可以访问所有策略
+            positions = StrategyPosition.get_all_strategy_positions(user_id=user_data['id'], is_superuser=True)
+            return jsonify({
+                'strategies': [{
+                    'strategy_name': item['strategy_name'],
+                    'positions': [{
+                        'code': pos['code'],
+                        'name': pos.get('name', ""),
+                        'volume': pos['volume'],
+                        'cost': pos['cost']
+                    } for pos in item['positions']],
+                    'update_time': item['update_time'].strftime('%Y-%m-%d %H:%M:%S')
+                } for item in positions],
+                'user_info': {
+                    'username': username,
+                    'is_superuser': True,
+                    'total_strategies': len(positions)
+                }
+            })
+        else:
+            # 普通用户只能访问授权的策略
+            user_strategies = UserStrategy.get_user_strategies(user_data['id'])
+            if not user_strategies:
+                return jsonify({
+                    'strategies': [],
+                    'user_info': {
+                        'username': username,
+                        'is_superuser': False,
+                        'authorized_strategies': 0,
+                        'accessible_strategies': 0,
+                        'message': '您没有查看任何策略的权限，请联系管理员'
+                    }
+                })
+            
+            allowed_strategy_names = [s['strategy_name'] for s in user_strategies]
+            
+            # 获取用户可访问的策略持仓（使用权限控制的方法）
+            filtered_positions = StrategyPosition.get_all_strategy_positions(user_id=user_data['id'], is_superuser=False)
+            
+            # 增加请求计数
+            UserStrategy.increment_request_count(user_data['id'], allowed_strategy_names)
+            
+            return jsonify({
+                'strategies': [{
+                    'strategy_name': item['strategy_name'],
+                    'positions': [{
+                        'code': pos['code'],
+                        'name': pos.get('name', ""),
+                        'volume': pos['volume'],
+                        'cost': pos['cost']
+                    } for pos in item['positions']],
+                    'update_time': item['update_time'].strftime('%Y-%m-%d %H:%M:%S')
+                } for item in filtered_positions],
+                'user_info': {
+                    'username': username,
+                    'is_superuser': False,
+                    'authorized_strategies': len(allowed_strategy_names),
+                    'accessible_strategies': len(filtered_positions)
+                }
+            })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -413,6 +866,57 @@ def login():
     
     return render_template('login.html')
 
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        strategies_text = request.form.get('strategies', '').strip()
+        
+        if not username or not password or not confirm_password:
+            flash('请填写所有必填字段', 'error')
+            return render_template('register.html')
+        
+        if password != confirm_password:
+            flash('两次输入的密码不一致', 'error')
+            return render_template('register.html')
+        
+        if len(password) < 6:
+            flash('密码长度至少6位', 'error')
+            return render_template('register.html')
+        
+        try:
+            # 创建普通用户（非管理员）
+            user = User.create_user(username, password, is_superuser=False)
+            
+            # 处理策略权限
+            if strategies_text:
+                strategy_names = [name.strip() for name in strategies_text.split('\n') if name.strip()]
+                for strategy_name in strategy_names:
+                    try:
+                        UserStrategy.add_user_strategy(user.id, strategy_name)
+                    except ValueError as e:
+                        # 忽略重复策略的错误
+                        pass
+                
+                if strategy_names:
+                    flash(f'用户 {username} 注册成功，已分配 {len(strategy_names)} 个策略权限，请登录', 'success')
+                else:
+                    flash(f'用户 {username} 注册成功，但未分配任何策略权限，请登录', 'info')
+            else:
+                flash(f'用户 {username} 注册成功，未分配任何策略权限，请登录', 'info')
+                
+            return redirect(url_for('login'))
+        except ValueError as e:
+            flash(str(e), 'error')
+            return render_template('register.html')
+        except Exception as e:
+            flash(f'注册失败: {str(e)}', 'error')
+            return render_template('register.html')
+    
+    return render_template('register.html')
+
 @app.route('/logout')
 def logout():
     if hasattr(app, 'has_flask_login') and app.has_flask_login:
@@ -431,7 +935,7 @@ def index():
     return render_template('index.html')
 
 @app.route('/adjustment')
-@web_login_required
+@superuser_required
 def adjustment():
     return render_template('adjustment.html')
 
@@ -506,6 +1010,103 @@ def delete_user():
         else:
             return jsonify({'error': '用户不存在'}), 404
             
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/user/strategies', methods=['GET'])
+@web_login_required
+def get_user_strategies():
+    """获取当前用户的策略权限和统计信息"""
+    try:
+        # 获取当前用户名
+        if hasattr(app, 'has_flask_login') and app.has_flask_login:
+            try:
+                username = current_user.username
+            except:
+                username = session.get('user_id')
+        else:
+            username = session.get('user_id')
+        
+        if not username:
+            return jsonify({'error': '用户未登录'}), 401
+        
+        user_data = User.get_user_by_username(username)
+        if not user_data:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        # 获取用户策略统计信息
+        stats = UserStrategy.get_user_strategy_stats(user_data['id'])
+        
+        return jsonify({
+            'user': {
+                'username': username,
+                'id': user_data['id']
+            },
+            'strategies': stats['strategies'],
+            'statistics': {
+                'total_strategies': stats['total_strategies'],
+                'today_requests': stats['today_requests']
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/admin/user/<int:user_id>/strategies', methods=['GET', 'POST', 'DELETE'])
+@superuser_required
+def manage_user_strategies(user_id):
+    """管理员管理用户策略权限"""
+    try:
+        user = User.query.filter_by(id=user_id, is_active=True).first()
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        if request.method == 'GET':
+            # 获取用户策略
+            stats = UserStrategy.get_user_strategy_stats(user_id)
+            return jsonify({
+                'user': {
+                    'id': user.id,
+                    'username': user.username
+                },
+                'strategies': stats['strategies'],
+                'statistics': {
+                    'total_strategies': stats['total_strategies'],
+                    'today_requests': stats['today_requests']
+                }
+            })
+        
+        elif request.method == 'POST':
+            # 添加策略权限
+            data = request.get_json()
+            strategy_name = data.get('strategy_name')
+            
+            if not strategy_name:
+                return jsonify({'error': '策略名称不能为空'}), 400
+            
+            try:
+                UserStrategy.add_user_strategy(user_id, strategy_name)
+                return jsonify({
+                    'message': f'已为用户 {user.username} 添加策略 {strategy_name} 权限'
+                })
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+        
+        elif request.method == 'DELETE':
+            # 移除策略权限
+            data = request.get_json()
+            strategy_name = data.get('strategy_name')
+            
+            if not strategy_name:
+                return jsonify({'error': '策略名称不能为空'}), 400
+            
+            try:
+                UserStrategy.remove_user_strategy(user_id, strategy_name)
+                return jsonify({
+                    'message': f'已移除用户 {user.username} 的策略 {strategy_name} 权限'
+                })
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+                
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -21,6 +21,8 @@ from xtquant import xtconstant
 
 from src.config import MINI_QMT_CONFIG, API_HOST, API_PORT, REDIS_CONFIG
 
+FOLLOW_RATIO = 1
+
 class WaitingOrderStatus(Enum):
     COMPLETED = "COMPLETED"
     NEED_REPLACE = "NEED_REPLACE"
@@ -287,6 +289,7 @@ class MiniQmtTrade:
 
     def _execute_position_sync(self, current_positions, target_positions):
         """执行持仓同步逻辑"""
+
         # 处理目标持仓
         target_dict = {}
         for pos in target_positions:
@@ -302,26 +305,29 @@ class MiniQmtTrade:
         for stock_code, current_data in current_positions.items():
             current_volume = current_data['volume']
             target_volume = target_dict.get(stock_code, 0)
-            
-            if current_volume > target_volume:
-                sell_volume = current_volume - target_volume
-                if sell_volume > 0:
-                    sell_orders.append({
-                        'stock_code': stock_code,
-                        'volume': sell_volume
-                    })
+            diff = current_volume - target_volume
+            if diff > 0:
+                # 按比例并向下取整为100的整数倍
+                sell_volume = int((diff * FOLLOW_RATIO) // 100 * 100)
+                if sell_volume <= 0:
+                    continue
+                sell_orders.append({
+                    'stock_code': stock_code,
+                    'volume': sell_volume
+                })
         
         # 检查需要买入的股票
         for stock_code, target_volume in target_dict.items():
             current_volume = current_positions.get(stock_code, {}).get('volume', 0)
-            
-            if target_volume > current_volume:
-                buy_volume = target_volume - current_volume
-                if buy_volume > 0:
-                    buy_orders.append({
-                        'stock_code': stock_code,
-                        'volume': buy_volume
-                    })
+            diff = target_volume - current_volume
+            if diff > 0:
+                buy_volume = int((diff * FOLLOW_RATIO) // 100 * 100)
+                if buy_volume <= 0:
+                    continue
+                buy_orders.append({
+                    'stock_code': stock_code,
+                    'volume': buy_volume
+                })
         
         # 执行卖出订单
         for order in sell_orders:

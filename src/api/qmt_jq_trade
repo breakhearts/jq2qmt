@@ -5,16 +5,6 @@ from typing import Dict, List
 from datetime import datetime, timedelta
 import time
 from enum import Enum
-import threading
-import json
-
-# Redis相关导入
-try:
-    import redis
-    REDIS_AVAILABLE = True
-except ImportError:
-    REDIS_AVAILABLE = False
-    print("Redis模块未安装，将使用HTTP轮询模式")
 
 class WaitngOrderStatus(Enum):
     COMPLETED = "COMPLETED"         # 所有订单已完成
@@ -22,22 +12,10 @@ class WaitngOrderStatus(Enum):
     PENDING_CANCEL = "PENDING"      # 有订单等待交易所处理
     ERROR = "ERROR"                 # 其他错误
 
-# Redis配置（从配置文件读取）
-REDIS_CONFIG = {
-    'ENABLED': True,
-    'HOST': '0.0.0.0',
-    'PORT': 5001,
-    'DB': 1,
-    'PASSWORD': 'REDACTED_REDIS_PASSWORD',
-    'CACHE_PREFIX': 'jq_qmt:',
-    'CHANNELS': {
-        'POSITION_UPDATE': 'jq_qmt:position_update',        # 单个策略持仓更新通知
-        'STRATEGY_UPDATE': 'jq_qmt:strategy_update',        # 策略更新通知
-        'TOTAL_POSITIONS_UPDATE': 'jq_qmt:total_positions_update',  # 总持仓更新通知
-    }
-}
 
-API_URL = "http://127.0.0.1:5366"  # 本地服务器API地址
+API_URL = "http://your_server_url:port"  # 服务器API地址（自动配置）
+USER_NAME = "your_username"  # 用户名
+PASSWORD = "your_password"  # 密码
 
 class G():
     def __init__(self):
@@ -50,257 +28,38 @@ class G():
         self.strategy_names = [
             'hand_strategy'
         ]
-        # Redis相关属性
-        self.redis_client = None
-        self.redis_pubsub = None
-        self.redis_listener_thread = None
-        self.redis_connected = False
-        self.use_redis_pubsub = False  # 是否启用Redis pub/sub模式
 
 g = G()
 
 
-def init_redis_connection():
-    """初始化Redis连接"""
-    if not REDIS_AVAILABLE or not REDIS_CONFIG.get('ENABLED', False):
-        print("Redis未启用或模块不可用，使用HTTP轮询模式")
-        return False
-    
-    try:
-        g.redis_client = redis.Redis(
-            host=REDIS_CONFIG.get('HOST', 'localhost'),
-            port=REDIS_CONFIG.get('PORT', 6379),
-            db=REDIS_CONFIG.get('DB', 0),
-            password=REDIS_CONFIG.get('PASSWORD', None),
-            decode_responses=True,
-            socket_timeout=5,
-            socket_connect_timeout=5
-        )
-        
-        # 测试连接
-        g.redis_client.ping()
-        g.redis_connected = True
-        print(f"Redis连接成功: {REDIS_CONFIG.get('HOST')}:{REDIS_CONFIG.get('PORT')}")
-        return True
-        
-    except Exception as e:
-        print(f"Redis连接失败: {e}")
-        g.redis_connected = False
-        g.redis_client = None
-        return False
-
-def start_redis_subscriber():
-    """启动Redis订阅监听器"""
-    if not g.redis_connected or not g.redis_client:
-        return False
-    
-    try:
-        g.redis_pubsub = g.redis_client.pubsub()
-        
-        # 订阅相关频道
-        channels = REDIS_CONFIG.get('CHANNELS', {})
-        if channels.get('POSITION_UPDATE'):
-            g.redis_pubsub.subscribe(channels['POSITION_UPDATE'])
-        if channels.get('STRATEGY_UPDATE'):
-            g.redis_pubsub.subscribe(channels['STRATEGY_UPDATE'])
-        if channels.get('TOTAL_POSITIONS_UPDATE'):
-            g.redis_pubsub.subscribe(channels['TOTAL_POSITIONS_UPDATE'])
-            
-        print(f"已订阅Redis频道: {list(channels.values())}")
-        
-        # 启动监听线程
-        g.redis_listener_thread = threading.Thread(
-            target=redis_message_listener, 
-            daemon=True
-        )
-        g.redis_listener_thread.start()
-        
-        g.use_redis_pubsub = True
-        print("Redis pub/sub监听器已启动")
-        return True
-        
-    except Exception as e:
-        print(f"启动Redis订阅失败: {e}")
-        return False
-
-def redis_message_listener():
-    """Redis消息监听器线程函数"""
-    if not g.redis_pubsub:
-        return
-    
-    print("Redis消息监听器开始运行...")
-    
-    try:
-        for message in g.redis_pubsub.listen():
-            if message['type'] == 'message':
-                try:
-                    channel = message['channel']
-                    data = json.loads(message['data'])
-                    
-                    print(f"收到Redis消息 - 频道: {channel}")
-                    
-                    # 处理持仓更新消息
-                    if channel == REDIS_CONFIG['CHANNELS'].get('POSITION_UPDATE'):
-                        handle_position_update_message(data)
-                    # 处理策略更新消息
-                    elif channel == REDIS_CONFIG['CHANNELS'].get('STRATEGY_UPDATE'):
-                        handle_strategy_update_message(data)
-                    # 处理总持仓更新消息
-                    elif channel == REDIS_CONFIG['CHANNELS'].get('TOTAL_POSITIONS_UPDATE'):
-                        handle_total_positions_update_message(data)
-                        
-                except json.JSONDecodeError as e:
-                    print(f"解析Redis消息失败: {e}")
-                except Exception as e:
-                    print(f"处理Redis消息时出错: {e}")
-                    
-    except Exception as e:
-        print(f"Redis监听器异常退出: {e}")
-        g.use_redis_pubsub = False
-
-def handle_position_update_message(data):
-    """处理持仓更新消息"""
-    try:
-        strategy_names = data.get('strategy_names', [])
-        strategy_name = data.get('strategy_name')
-        positions = data.get('positions', [])
-        update_time = data.get('update_time')
-        
-        # 检查是否是我们关注的策略
-        if not strategy_names or any(name in g.strategy_names for name in strategy_names):
-            print(f"检测到持仓更新: 策略={strategy_names}, 持仓数={len(positions)}, 时间={update_time}")
-            
-            # 如果消息包含完整的持仓数据，直接使用Redis数据，无需HTTP请求
-            if positions:
-                print(f"  ↳ 从Redis消息获取完整持仓数据: {len(positions)} 个持仓")
-                # 更新QMT API对象的缓存
-                if hasattr(g, 'qmt_api') and g.qmt_api:
-                    g.qmt_api.update_cache_from_redis(positions, update_time)
-            
-            # 触发同步检查
-            g.latest_update_time = None  # 强制更新
-            
-    except Exception as e:
-        print(f"处理持仓更新消息失败: {e}")
-
-def handle_strategy_update_message(data):
-    """处理策略更新消息"""
-    try:
-        strategy_name = data.get('strategy_name')
-        action = data.get('action')  # 'update', 'delete', 'create'
-        positions = data.get('positions', [])
-        update_time = data.get('update_time')
-        
-        if strategy_name in g.strategy_names:
-            print(f"检测到策略更新: {strategy_name} - {action}")
-            
-            # 如果包含持仓数据，直接使用Redis数据
-            if positions and action == 'update':
-                print(f"  ↳ 从Redis消息获取策略持仓数据: {len(positions)} 个持仓")
-                if hasattr(g, 'qmt_api') and g.qmt_api:
-                    g.qmt_api.update_cache_from_redis(positions, update_time)
-            
-            # 清除本地缓存的更新时间，强制下次同步
-            g.latest_update_time = None
-            
-    except Exception as e:
-        print(f"处理策略更新消息失败: {e}")
-
-def handle_total_positions_update_message(data):
-    """处理总持仓更新消息"""
-    try:
-        strategy_names = data.get('strategy_names', [])
-        include_adjustments = data.get('include_adjustments', True)
-        positions = data.get('positions', [])
-        update_time = data.get('update_time')
-        
-        # 检查是否与我们关注的策略相关
-        if not strategy_names or any(name in g.strategy_names for name in strategy_names):
-            print(f"检测到总持仓更新: 策略={strategy_names}, 调整策略={include_adjustments}, 持仓数={len(positions)}")
-            
-            # 直接使用Redis中的完整总持仓数据
-            if positions:
-                print(f"  ↳ 从Redis消息获取完整总持仓数据: {len(positions)} 个持仓")
-                # 更新QMT API对象的缓存
-                if hasattr(g, 'qmt_api') and g.qmt_api:
-                    g.qmt_api.update_cache_from_redis(positions, update_time)
-                
-                # 触发立即同步检查（基于Redis数据）
-                g.latest_update_time = None
-            
-    except Exception as e:
-        print(f"处理总持仓更新消息失败: {e}")
-
-def stop_redis_subscriber():
-    """停止Redis订阅"""
-    try:
-        if g.redis_pubsub:
-            g.redis_pubsub.unsubscribe()
-            g.redis_pubsub.close()
-            g.redis_pubsub = None
-            
-        if g.redis_listener_thread and g.redis_listener_thread.is_alive():
-            g.redis_listener_thread.join(timeout=5)
-            
-        g.use_redis_pubsub = False
-        print("Redis订阅已停止")
-        
-    except Exception as e:
-        print(f"停止Redis订阅时出错: {e}")
-
+# 跟单模式配置
+FOLLOW_RATIO = 1  # 账户跟单比例，交易时按照比例下单
 
 class QMTAPI:
-    def __init__(self, C, strategy_names=None):
+    def __init__(self, C, strategy_names=None,USER_NAME=USER_NAME, PASSWORD=PASSWORD):
+        """
+        初始化QMTAPI实例
+        :param C: 策略上下文对象
+        :param strategy_names: 策略名称列表，默认为None
+        """
+        self.USER_NAME = USER_NAME
+        self.PASSWORD = PASSWORD
         self.api_url = API_URL
         self.C = C
         self.strategy_names = strategy_names
-        self._cached_positions = None
-        self._cache_time = None
-        self._cache_timeout = 30  # 缓存超时时间（秒）
     
     def get_total_positions(self) -> Dict:
-        """获取总持仓数据，支持Redis pub/sub优化"""
-        
-        # 如果启用了Redis pub/sub且没有收到更新通知，使用缓存
-        if g.use_redis_pubsub and self._cached_positions and self._cache_time:
-            cache_age = (datetime.now() - self._cache_time).total_seconds()
-            if cache_age < self._cache_timeout:
-                print(f"使用Redis缓存的持仓数据 (缓存时间: {cache_age:.1f}秒)")
-                return self._cached_positions
-        
-        # 从服务器获取数据
-        positions = self._fetch_positions_from_server()
-        
-        # 更新缓存
-        if positions['positions'] or positions['update_time']:
-            self._cached_positions = positions
-            self._cache_time = datetime.now()
-            
-        return positions
-    
-    def update_cache_from_redis(self, positions, update_time):
-        """从Redis消息更新缓存"""
-        self._cached_positions = {
-            'positions': positions,
-            'update_time': update_time
-        }
-        self._cache_time = datetime.now()
-        print(f"从Redis消息更新持仓缓存: {len(positions)} 个持仓")
-    
-    def _fetch_positions_from_server(self) -> Dict:
-        """从服务器获取持仓数据"""
         try:
             url = f'{self.api_url}/api/v1/positions/total'
             if self.strategy_names:
                 url += f'?strategies={",".join(self.strategy_names)}'
-                
+            # 添加用户名和密码作为查询参数
+            url += f'&username={self.USER_NAME}&password={self.PASSWORD}'
             response = requests.get(url, timeout=10)
             if response.status_code != 200:
                 print(f'获取总持仓失败: HTTP {response.status_code} - {response.text}')
                 return {'positions': [], 'update_time': None}
             data = response.json()
-            
-            print(f"从服务器获取持仓数据成功 (策略: {self.strategy_names})")
             return {
                 'positions': data['positions'],
                 'update_time': data.get('update_time')
@@ -314,12 +73,6 @@ class QMTAPI:
         except Exception as e:
             print(f'获取总持仓其他错误: {str(e)}')
             return {'positions': [], 'update_time': None}
-    
-    def invalidate_cache(self):
-        """清除缓存，强制下次请求从服务器获取数据"""
-        self._cached_positions = None
-        self._cache_time = None
-        print("持仓数据缓存已清除")
 
     def sync_positions(self, account: str):
         # 获取最新数据和更新时间
@@ -331,16 +84,11 @@ class QMTAPI:
             print("获取持仓数据失败，跳过本次同步")
             return
     
-        # 在Redis pub/sub模式下，如果没有接收到更新通知且时间未变化，跳过同步
-        if g.use_redis_pubsub and g.latest_update_time and current_update_time == g.latest_update_time:
-            print("Redis pub/sub模式: 数据未更新，跳过同步")
-            return
-        
-        # 检查是否需要更新（HTTP轮询模式的逻辑保持不变）
-        if not g.use_redis_pubsub and g.latest_update_time and current_update_time == g.latest_update_time:
+        # 检查是否需要更新
+        if g.latest_update_time and current_update_time == g.latest_update_time:
             return
 
-        print(f"\n=== 开始持仓同步 (模式: {'Redis pub/sub' if g.use_redis_pubsub else 'HTTP轮询'}) ===")
+        print("\n=== 开始持仓同步 ===")
         max_sync_positions = 10
         while max_sync_positions > 0:
             max_sync_positions -= 1
@@ -370,17 +118,24 @@ class QMTAPI:
                 for code, info in differences.items():
                     diff = info['diff']
                     available = info['available']
+                    # 按比例计算买入/卖出股数，并向下取整为100的整数倍
                     if diff > 0:  # 需要卖出
-                        if available >= diff:
+                        sell_volume = int((diff * FOLLOW_RATIO) // 100 * 100)
+                        if sell_volume <= 0:
+                            continue
+                        if available >= sell_volume:
                             sell_orders[code] = {
-                                'volume': diff,
+                                'volume': sell_volume,
                                 'available': available
                             }
                         else:
-                            print(f"  ! 卖出检查失败 {code}: 需要卖出 {diff} 股，但可用仅有 {available} 股")
+                            print(f"  ! 卖出检查失败 {code}: 需要卖出 {sell_volume} 股，但可用仅有 {available} 股")
                     else:  # 需要买入
+                        buy_volume = int((abs(diff) * FOLLOW_RATIO) // 100 * 100)
+                        if buy_volume <= 0:
+                            continue
                         buy_orders[code] = {
-                            'volume': abs(diff)
+                            'volume': buy_volume
                         }
                 if sell_orders:
                     t_orders = sell_orders
@@ -818,23 +573,9 @@ def adjust(ContextInfo):
     if is_trading_time or DEBUG:
         # 在交易时间内，执行同步操作
         api = QMTAPI(ContextInfo, g.strategy_names)
-        
-        # 将API对象存储在全局变量中，供Redis消息处理使用
-        g.qmt_api = api
-        
         api.sync_positions(g.account)
-        
-        # 根据Redis pub/sub状态调整下次运行间隔
-        if g.use_redis_pubsub:
-            # Redis pub/sub模式：降低轮询频率，因为会通过消息通知
-            sync_interval = max(g.sync_positions_interval * 3, 15)  # 至少15秒
-            print(f"Redis pub/sub模式：下次同步间隔设置为 {sync_interval} 秒")
-        else:
-            # HTTP轮询模式：使用原有间隔
-            sync_interval = g.sync_positions_interval
-            print(f"HTTP轮询模式：下次同步间隔设置为 {sync_interval} 秒")
-            
-        next_run = now + timedelta(seconds=sync_interval)
+        # 安排下一次运行
+        next_run = now + timedelta(seconds=g.sync_positions_interval)
     else:
         # 非交易时间，安排明天9:30运行
         next_run = (now + timedelta(days=1)).replace(
@@ -847,24 +588,13 @@ def adjust(ContextInfo):
 def init(ContextInfo):
     g.account = account
     print(f"!!!!当前监控策略:{g.strategy_names}")
-    
-    # 初始化Redis连接和订阅
-    print("\n=== 初始化Redis连接 ===")
-    if init_redis_connection():
-        if start_redis_subscriber():
-            print("✓ Redis pub/sub模式已启用，将减少HTTP请求频率")
-        else:
-            print("! Redis连接成功但订阅启动失败，使用HTTP轮询模式")
-    else:
-        print("! Redis连接失败，使用HTTP轮询模式")
-    
     # 计算今天的9:30
     now = datetime.now()
     current_time = now.time()
     if current_time <= datetime.strptime("15:00:00", "%H:%M:%S").time() or DEBUG:
-        g.first_run = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        g.first_run = now.replace(hour=9, minute=30, second=0, microsecond=0)
     else:
-        g.first_run = now.replace(hour=9, minute=15, second=0, microsecond=0) + timedelta(days=1)
+        g.first_run = now.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=1)
     print(f"设置第一次运行时间:{g.first_run}")
     # 设置调度，从first_run开始运行
     schedule_run(ContextInfo, adjust, g.first_run)

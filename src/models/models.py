@@ -326,101 +326,181 @@ class StrategyPosition(db.Model):
         return positions
 
     @staticmethod
-    def get_all_strategy_positions():
-        # 先尝试从Redis获取
-        cached_data = get_redis_cache('strategy', 'all_strategies')
-        if cached_data:
-            logger.debug("从Redis缓存获取所有策略持仓数据")
-            return cached_data
+    def get_all_strategy_positions(user_id=None, is_superuser=False):
+        """
+        获取所有策略持仓，基于用户权限过滤
+        user_id: 用户ID，用于权限控制
+        is_superuser: 是否为超级用户
+        """
         
-        # Redis中没有，从数据库获取
-        strategies = StrategyPosition.query.all()
-        result = [{
-            'strategy_name': strategy.strategy_name,
-            'positions': strategy.positions,
-            'update_time': strategy.update_time
-        } for strategy in strategies]
+        # 1. 先查询MySQL获取用户可访问的策略列表
+        if is_superuser:
+            # 超级用户可以访问所有策略
+            all_strategies = StrategyPosition.query.all()
+            allowed_strategy_names = [s.strategy_name for s in all_strategies]
+        elif user_id:
+            # 普通用户只能访问授权的策略
+            user_strategies = UserStrategy.get_user_strategies(user_id)
+            if not user_strategies:
+                return []
+            allowed_strategy_names = [s['strategy_name'] for s in user_strategies]
+        else:
+            # 没有用户信息，返回空
+            return []
         
-        # 存入Redis缓存
-        try:
-            # 转换datetime为字符串以便JSON序列化
-            cache_data = []
-            for item in result:
-                cache_item = item.copy()
-                cache_item['update_time'] = item['update_time'].isoformat()
-                cache_data.append(cache_item)
-            
-            set_redis_cache('strategy', 'all_strategies', cache_data)
-            logger.debug("所有策略持仓数据已缓存到Redis")
-        except Exception as e:
-            logger.error(f"缓存所有策略数据到Redis失败: {e}")
+        # 2. 根据策略名称查询对应的Redis缓存
+        result = []
+        
+        for strategy_name in allowed_strategy_names:
+            # 先尝试从Redis获取单个策略数据
+            cached_data = get_redis_cache('strategy', strategy_name)
+            if cached_data:
+                logger.debug(f"从Redis缓存获取策略 {strategy_name} 的持仓数据")
+                # Redis中的数据格式需要转换
+                try:
+                    update_time = datetime.fromisoformat(cached_data['update_time']) if isinstance(cached_data.get('update_time'), str) else cached_data.get('update_time')
+                except:
+                    update_time = datetime.now()
+                
+                result.append({
+                    'strategy_name': strategy_name,
+                    'positions': cached_data.get('positions', []),
+                    'update_time': update_time
+                })
+            else:
+                # Redis中没有，从数据库获取并缓存
+                strategy = StrategyPosition.query.filter_by(strategy_name=strategy_name).first()
+                if strategy:
+                    result.append({
+                        'strategy_name': strategy.strategy_name,
+                        'positions': strategy.positions,
+                        'update_time': strategy.update_time
+                    })
+                    
+                    # 存入Redis缓存
+                    try:
+                        strategy_data = {
+                            'strategy_name': strategy.strategy_name,
+                            'positions': strategy.positions,
+                            'update_time': strategy.update_time.isoformat()
+                        }
+                        set_redis_cache('strategy', strategy_name, strategy_data, timeout=300)  # 5分钟缓存
+                        logger.debug(f"策略 {strategy_name} 的持仓数据已缓存到Redis")
+                    except Exception as e:
+                        logger.error(f"缓存策略数据到Redis失败: {e}")
         
         return result
 
     @staticmethod
-    def get_total_positions(strategy_names=None, include_adjustments=True):
-        # 生成缓存键
-        cache_key = 'total_positions'
-        if strategy_names:
-            cache_key += f"_{hashlib.md5(str(sorted(strategy_names)).encode()).hexdigest()[:8]}"
-        if not include_adjustments:
-            cache_key += '_no_adj'
+    def get_total_positions(strategy_names=None, include_adjustments=True, user_id=None, is_superuser=False):
+        """
+        获取总持仓（合并多个策略），基于用户权限过滤
+        strategy_names: 指定的策略名称列表
+        include_adjustments: 是否包含调整策略
+        user_id: 用户ID，用于权限控制
+        is_superuser: 是否为超级用户
+        """
         
-        # 先尝试从Redis获取
-        cached_data = get_redis_cache('strategy', cache_key)
-        if cached_data:
-            logger.debug(f"从Redis缓存获取总持仓数据: {cache_key}")
-            # 转换update_time回datetime对象
-            if 'update_time' in cached_data and isinstance(cached_data['update_time'], str):
-                try:
-                    cached_data['update_time'] = datetime.fromisoformat(cached_data['update_time'])
-                except:
-                    cached_data['update_time'] = datetime.now()
-            return cached_data
-        
-        # Redis中没有，从数据库计算
-        # 获取策略数据
+        # 1. 确定要查询的策略列表
         if strategy_names:
-            all_strategies = StrategyPosition.query.filter(
-                StrategyPosition.strategy_name.in_(strategy_names)
-            ).all()
-        else:
-            # 获取所有策略，但可以选择是否包含调整策略
-            if include_adjustments:
-                all_strategies = StrategyPosition.query.all()
+            # 如果指定了策略，需要验证权限
+            if is_superuser:
+                # 超级用户可以访问任何策略
+                target_strategies = strategy_names
+            elif user_id:
+                # 普通用户需要验证权限
+                user_strategies = UserStrategy.get_user_strategies(user_id)
+                allowed_strategy_names = [s['strategy_name'] for s in user_strategies]
+                # 过滤出用户有权限的策略
+                target_strategies = [name for name in strategy_names if name in allowed_strategy_names]
             else:
-                all_strategies = StrategyPosition.query.filter(
-                    ~StrategyPosition.strategy_name.like('ADJUSTMENT_%')
-                ).all()
-            
+                # 没有用户信息，返回空
+                target_strategies = []
+        else:
+            # 如果没有指定策略，根据用户权限获取所有可访问的策略
+            if is_superuser:
+                # 超级用户获取所有策略
+                all_strategies = StrategyPosition.query.all()
+                target_strategies = [s.strategy_name for s in all_strategies]
+            elif user_id:
+                # 普通用户获取授权的策略
+                user_strategies = UserStrategy.get_user_strategies(user_id)
+                target_strategies = [s['strategy_name'] for s in user_strategies] if user_strategies else []
+            else:
+                # 没有用户信息，返回空
+                target_strategies = []
+        
+        # 2. 根据 include_adjustments 参数过滤调整策略
+        if not include_adjustments:
+            target_strategies = [name for name in target_strategies if not name.startswith('ADJUSTMENT_')]
+        
+        # 3. 通过策略名称查询对应的Redis缓存或数据库
+        all_strategy_data = []
+        for strategy_name in target_strategies:
+            # 先尝试从Redis获取
+            cached_data = get_redis_cache('strategy', strategy_name)
+            if cached_data:
+                logger.debug(f"从Redis缓存获取策略 {strategy_name} 的持仓数据")
+                try:
+                    update_time = datetime.fromisoformat(cached_data['update_time']) if isinstance(cached_data.get('update_time'), str) else cached_data.get('update_time')
+                except:
+                    update_time = datetime.now()
+                
+                all_strategy_data.append({
+                    'strategy_name': strategy_name,
+                    'positions': cached_data.get('positions', []),
+                    'update_time': update_time
+                })
+            else:
+                # Redis中没有，从数据库获取
+                strategy = StrategyPosition.query.filter_by(strategy_name=strategy_name).first()
+                if strategy:
+                    all_strategy_data.append({
+                        'strategy_name': strategy.strategy_name,
+                        'positions': strategy.positions,
+                        'update_time': strategy.update_time
+                    })
+                    
+                    # 存入Redis缓存
+                    try:
+                        strategy_data = {
+                            'strategy_name': strategy.strategy_name,
+                            'positions': strategy.positions,
+                            'update_time': strategy.update_time.isoformat()
+                        }
+                        set_redis_cache('strategy', strategy_name, strategy_data, timeout=300)  # 5分钟缓存
+                        logger.debug(f"策略 {strategy_name} 的持仓数据已缓存到Redis")
+                    except Exception as e:
+                        logger.error(f"缓存策略数据到Redis失败: {e}")
+        
+        # 4. 合并计算总持仓
         total_positions = {}
-        # 设置默认的最早开始时间
         latest_update_time = datetime(1970, 1, 1)
         
-        for strategy in all_strategies:
+        for strategy_data in all_strategy_data:
             # 更新最新时间
-            if latest_update_time is None or strategy.update_time > latest_update_time:
-                latest_update_time = strategy.update_time
+            if strategy_data['update_time'] and strategy_data['update_time'] > latest_update_time:
+                latest_update_time = strategy_data['update_time']
                 
-            for pos in strategy.positions:
+            for pos in strategy_data['positions']:
                 code = pos['code']
                 if code not in total_positions:
                     total_positions[code] = {
                         'code': code,
-                        'name': pos.get('name', code),  # 使用股票名称，如果没有则使用代码
+                        'name': pos.get('name', code),
                         'total_volume': 0,
                         'total_cost': 0
                     }
                 
                 # 对于调整策略，直接加减持仓数量和成本
-                if strategy.strategy_name.startswith('ADJUSTMENT_'):
+                if strategy_data['strategy_name'].startswith('ADJUSTMENT_'):
                     total_positions[code]['total_volume'] += pos['volume']
                     total_positions[code]['total_cost'] += pos['volume'] * pos['cost']
                 else:
                     total_positions[code]['total_volume'] += pos['volume']
                     total_positions[code]['total_cost'] += pos['volume'] * pos['cost']
         
-        # 计算平均成本并过滤掉持仓为0的股票
+        # 5. 计算平均成本并过滤掉持仓为0的股票
         filtered_positions = {}
         for code in total_positions:
             if total_positions[code]['total_volume'] != 0:
@@ -438,21 +518,172 @@ class StrategyPosition(db.Model):
                 del total_positions[code]['total_cost']
                 filtered_positions[code] = total_positions[code]
         
-        result = {
+        return {
             'positions': list(filtered_positions.values()),
             'update_time': latest_update_time
         }
+
+
+class UserStrategy(db.Model):
+    """用户-策略关联表，记录用户可查看的策略和当日请求次数"""
+    __tablename__ = 'user_strategies'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    strategy_name = db.Column(db.String(100), nullable=False, index=True)
+    daily_request_count = db.Column(db.Integer, default=0, nullable=False)  # 当日请求次数
+    last_request_date = db.Column(db.Date, nullable=True)  # 最后请求日期
+    created_time = db.Column(db.DateTime, default=datetime.now)
+    updated_time = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)  # 是否激活
+    
+    # 唯一约束：一个用户对应一个策略只能有一条记录
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'strategy_name', name='unique_user_strategy'),
+    )
+    
+    @staticmethod
+    def get_user_strategies(user_id):
+        """获取用户可查看的策略列表"""
+        strategies = UserStrategy.query.filter_by(
+            user_id=user_id, 
+            is_active=True
+        ).all()
         
-        # 存入Redis缓存
+        return [{
+            'strategy_name': s.strategy_name,
+            'daily_request_count': s.daily_request_count,
+            'last_request_date': s.last_request_date.strftime('%Y-%m-%d') if s.last_request_date else None,
+            'created_time': s.created_time.strftime('%Y-%m-%d %H:%M:%S')
+        } for s in strategies]
+    
+    @staticmethod
+    def add_user_strategy(user_id, strategy_name):
+        """为用户添加策略权限"""
+        # 检查是否已存在
+        existing = UserStrategy.query.filter_by(
+            user_id=user_id, 
+            strategy_name=strategy_name
+        ).first()
+        
+        if existing:
+            if not existing.is_active:
+                # 重新激活已删除的策略
+                existing.is_active = True
+                existing.updated_time = datetime.now()
+                db.session.commit()
+                return existing
+            else:
+                raise ValueError(f"用户已有策略 {strategy_name} 的权限")
+        
+        # 创建新的策略权限
+        user_strategy = UserStrategy(
+            user_id=user_id,
+            strategy_name=strategy_name
+        )
+        db.session.add(user_strategy)
+        db.session.commit()
+        
+        # 清除相关缓存
         try:
-            cache_data = result.copy()
-            cache_data['update_time'] = latest_update_time.isoformat()
-            set_redis_cache('strategy', cache_key, cache_data)
-            logger.debug(f"总持仓数据已缓存到Redis: {cache_key}")
+            delete_redis_cache('user_strategy', f'user_{user_id}')
+            logger.info(f"为用户 {user_id} 添加策略 {strategy_name} 权限成功")
         except Exception as e:
-            logger.error(f"缓存总持仓数据到Redis失败: {e}")
+            logger.error(f"清除用户策略Redis缓存失败: {e}")
         
-        return result
+        return user_strategy
+    
+    @staticmethod
+    def remove_user_strategy(user_id, strategy_name):
+        """移除用户的策略权限"""
+        user_strategy = UserStrategy.query.filter_by(
+            user_id=user_id, 
+            strategy_name=strategy_name,
+            is_active=True
+        ).first()
+        
+        if not user_strategy:
+            raise ValueError(f"用户没有策略 {strategy_name} 的权限")
+        
+        user_strategy.is_active = False
+        user_strategy.updated_time = datetime.now()
+        db.session.commit()
+        
+        # 清除相关缓存
+        try:
+            delete_redis_cache('user_strategy', f'user_{user_id}')
+            logger.info(f"移除用户 {user_id} 的策略 {strategy_name} 权限成功")
+        except Exception as e:
+            logger.error(f"清除用户策略Redis缓存失败: {e}")
+    
+    @staticmethod
+    def check_user_strategy_permission(user_id, strategy_name):
+        """检查用户是否有某策略的查看权限"""
+        user_strategy = UserStrategy.query.filter_by(
+            user_id=user_id,
+            strategy_name=strategy_name,
+            is_active=True
+        ).first()
+        
+        return user_strategy is not None
+    
+    @staticmethod
+    def increment_request_count(user_id, strategy_names):
+        """增加用户对策略的请求次数"""
+        today = datetime.now().date()
+        
+        for strategy_name in strategy_names:
+            user_strategy = UserStrategy.query.filter_by(
+                user_id=user_id,
+                strategy_name=strategy_name,
+                is_active=True
+            ).first()
+            
+            if user_strategy:
+                # 检查是否是新的一天
+                if user_strategy.last_request_date != today:
+                    # 新的一天，重置计数
+                    user_strategy.daily_request_count = 1
+                    user_strategy.last_request_date = today
+                else:
+                    # 同一天，计数+1
+                    user_strategy.daily_request_count += 1
+                
+                user_strategy.updated_time = datetime.now()
+        
+        db.session.commit()
+        
+        # 清除相关缓存
+        try:
+            delete_redis_cache('user_strategy', f'user_{user_id}')
+        except Exception as e:
+            logger.error(f"清除用户策略Redis缓存失败: {e}")
+    
+    @staticmethod
+    def get_user_strategy_stats(user_id):
+        """获取用户策略统计信息"""
+        today = datetime.now().date()
+        
+        strategies = UserStrategy.query.filter_by(
+            user_id=user_id,
+            is_active=True
+        ).all()
+        
+        total_strategies = len(strategies)
+        today_requests = sum(
+            s.daily_request_count for s in strategies 
+            if s.last_request_date == today
+        )
+        
+        return {
+            'total_strategies': total_strategies,
+            'today_requests': today_requests,
+            'strategies': [{
+                'strategy_name': s.strategy_name,
+                'daily_request_count': s.daily_request_count if s.last_request_date == today else 0,
+                'last_request_date': s.last_request_date.strftime('%Y-%m-%d') if s.last_request_date else None
+            } for s in strategies]
+        }
 
 
 class User(db.Model):

@@ -273,9 +273,13 @@
         <div class="user-info">
             <div class="nav-links">
                 <a href="/">持仓查看</a>
+                {% if current_user.is_superuser %}
                 <a href="/adjustment">持仓调整</a>
+                {% endif %}
                 <a href="/password">密码管理</a>
+                {% if current_user.is_superuser %}
                 <a href="/users" class="active">用户管理</a>
+                {% endif %}
             </div>
             <span>欢迎，{{ current_user.username }}！</span>
             <a href="/logout" class="logout-btn">退出登录</a>

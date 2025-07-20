@@ -97,6 +97,15 @@
             border-left: 4px solid #c62828;
         }
         
+        .success-message {
+            background: #e8f5e8;
+            color: #2e7d32;
+            padding: 0.75rem;
+            border-radius: 5px;
+            margin-bottom: 1rem;
+            border-left: 4px solid #2e7d32;
+        }
+        
         .info-message {
             background: #e3f2fd;
             color: #1565c0;
@@ -113,6 +122,21 @@
             border-top: 1px solid #eee;
             color: #666;
             font-size: 0.8rem;
+        }
+        
+        .register-link {
+            text-align: center;
+            margin-top: 1rem;
+        }
+        
+        .register-link a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        
+        .register-link a:hover {
+            text-decoration: underline;
         }
         
         .remember-me {
@@ -140,17 +164,19 @@
             <p>请登录您的账户</p>
         </div>
         
-        {% if error %}
-        <div class="error-message">
-            {{ error }}
-        </div>
-        {% endif %}
-        
-        {% if info %}
-        <div class="info-message">
-            {{ info }}
-        </div>
-        {% endif %}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    {% if category == 'error' %}
+                        <div class="error-message">{{ message }}</div>
+                    {% elif category == 'success' %}
+                        <div class="success-message">{{ message }}</div>
+                    {% else %}
+                        <div class="info-message">{{ message }}</div>
+                    {% endif %}
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
         
         <form method="POST" action="/login">
             <div class="form-group">
@@ -173,6 +199,10 @@
             
             <button type="submit" class="login-btn">登录</button>
         </form>
+        
+        <div class="register-link">
+            <p>还没有账户？ <a href="/register">立即注册</a></p>
+        </div>
         
         <div class="footer">
             <p>JQ-QMT 量化交易系统 &copy; 2025</p>

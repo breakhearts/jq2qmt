@@ -24,7 +24,7 @@ qmt_jq/
 │   ├── api/
 │   │   ├── jq_config.py        # 聚宽端配置文件（需要放到聚宽研究根目录）
 │   │   ├── jq_qmt_api.py        # 聚宽端API，用于上传持仓（需要放到聚宽研究根目录）
-│   │   └── qmt_jq_trade.py      # QMT端API，用于同步持仓（复制到QMT策略里执行）
+│   │   └── qmt_jq_trade.py      # QMT端API，用于同步持仓（复制到QMT策略里执行,需要手动编辑编辑账号和密码）
 │   ├── auth/
 │   │   └── simple_crypto_auth.py # 加密认证系统
 │   └── templates/
@@ -51,7 +51,7 @@ qmt_jq/
 聚宽策略 → HTTP请求 → Flask服务器 → MySQL数据库 → QMT客户端 → 实盘交易
 ```
 
-## V2.0 新增功能
+## V1.2 新增功能
 
 ### 👥 完整用户管理系统
 系统新增了完整的用户认证和管理功能：

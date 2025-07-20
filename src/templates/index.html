@@ -155,7 +155,9 @@
         <div class="user-info">
             <div class="nav-links">
                 <a href="/" class="active">持仓查看</a>
+                {% if session.is_superuser or (current_user and current_user.is_superuser) %}
                 <a href="/adjustment">持仓调整</a>
+                {% endif %}
                 <a href="/password">密码管理</a>
                 {% if session.is_superuser or (current_user and current_user.is_superuser) %}
                 <a href="/users">用户管理</a>
@@ -194,8 +196,8 @@
         async function fetchData() {
             try {
                 const [totalResponse, allResponse] = await Promise.all([
-                    fetch('/api/v1/positions/total'),
-                    fetch('/api/v1/positions/all')
+                    fetch('/api/v1/positions/total/web'),
+                    fetch('/api/v1/positions/all/web')
                 ]);
                 
                 const totalData = await totalResponse.json();

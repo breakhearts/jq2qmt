@@ -17,7 +17,7 @@ from sqlalchemy.engine import URL
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import DB_CONFIG, SQLALCHEMY_DATABASE_URI
-from src.models.models import db, StrategyPosition, InternalPasswordManager, User
+from src.models.models import db, StrategyPosition, InternalPasswordManager, User, UserStrategy
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

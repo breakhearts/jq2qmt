@@ -1,5 +1,5 @@
 -- JQ-QMT 数据库结构
--- 生成时间: 2025-07-19 20:54:14
+-- 生成时间: 2025-07-20 09:44:50
 
 -- 创建数据库
 CREATE DATABASE IF NOT EXISTS `quant` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
