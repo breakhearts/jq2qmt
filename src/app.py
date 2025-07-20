@@ -947,12 +947,12 @@ def password_management():
 @app.route('/users')
 @superuser_required
 def user_management():
-    users = User.get_active_users_for_superuser()
+    users = User.get_all_users_for_superuser()
     
     # 计算统计数据
     stats = {
         'total_users': len(users),
-        'active_users': len([u for u in users if u['last_activity_time'] != '无活跃记录']),
+        'active_users': len([u for u in users if u['is_active'] and u['last_activity_time'] != '无活跃记录']),
         'superusers': len([u for u in users if u['is_superuser']]),
         'users_with_keys': len([u for u in users if u['has_private_key'] and u['has_public_key']])
     }
@@ -1010,6 +1010,79 @@ def delete_user():
         else:
             return jsonify({'error': '用户不存在'}), 404
             
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/edit/<username>')
+@superuser_required
+def get_user_info(username):
+    """获取用户详细信息"""
+    try:
+        user_data = User.get_user_by_username(username)
+        if not user_data:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        # 获取所有可用的策略
+        all_strategies = User.get_all_strategy_names()
+        
+        return jsonify({
+            'user': user_data,
+            'all_strategies': all_strategies
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/users/update', methods=['POST'])
+@superuser_required
+def update_user():
+    """更新用户信息"""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        is_active = data.get('is_active', True)
+        strategies = data.get('strategies')
+        
+        if not username:
+            return jsonify({'error': '用户名不能为空'}), 400
+        
+        # 限制策略数量
+        if strategies is not None and len(strategies) > 5:
+            return jsonify({'error': '每个用户最多只能订阅5个策略'}), 400
+        
+        # 更新用户状态
+        User.update_user_status(username, is_active)
+        
+        # 如果提供了策略列表，则更新策略
+        if strategies is not None:
+            # 获取用户ID
+            user_data = User.get_user_by_username(username)
+            if not user_data:
+                return jsonify({'error': '用户不存在'}), 404
+            
+            user_id = user_data['id']
+            
+            # 更新用户策略 - 先清除所有现有策略
+            existing_strategies = UserStrategy.query.filter_by(user_id=user_id).all()
+            for us in existing_strategies:
+                us.is_active = False
+            
+            # 添加新的策略
+            for strategy_name in strategies:
+                try:
+                    UserStrategy.add_user_strategy(user_id, strategy_name)
+                except ValueError:
+                    # 如果策略已存在，重新激活它
+                    existing = UserStrategy.query.filter_by(
+                        user_id=user_id, 
+                        strategy_name=strategy_name
+                    ).first()
+                    if existing:
+                        existing.is_active = True
+            
+            db.session.commit()
+        
+        return jsonify({'message': f'用户 {username} 信息已更新'})
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

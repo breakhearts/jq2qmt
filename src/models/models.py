@@ -861,26 +861,97 @@ class User(db.Model):
             logger.error(f"清除用户Redis缓存失败: {e}")
     
     @staticmethod
-    def get_active_users_for_superuser():
-        """获取最近活跃的用户列表（仅超级管理员可查看）"""
+    def update_user_status(username, is_active):
+        """更新用户状态（激活/禁用）"""
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            raise ValueError("用户不存在")
+        
+        # 不允许禁用超级管理员
+        if user.is_superuser and not is_active:
+            raise ValueError("不能禁用超级管理员")
+        
+        user.is_active = is_active
+        user.updated_time = datetime.now()
+        db.session.commit()
+        
+        # 清除Redis缓存
+        try:
+            delete_redis_cache('user', f'user_{username}')
+            delete_redis_cache('user', 'all_users')
+            logger.info(f"用户 {username} 状态已更新为: {'激活' if is_active else '禁用'}")
+        except Exception as e:
+            logger.error(f"清除用户Redis缓存失败: {e}")
+    
+    @staticmethod
+    def get_all_strategy_names():
+        """获取所有可用的策略名称"""
+        strategies = StrategyPosition.query.all()
+        return [s.strategy_name for s in strategies]
+    
+    @staticmethod
+    def get_user_by_username(username):
+        """根据用户名获取用户信息（包括非激活用户）"""
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            return None
+        
+        # 获取用户的策略信息
+        user_strategies = UserStrategy.query.filter_by(
+            user_id=user.id,
+            is_active=True
+        ).all()
+        
+        strategies_list = [us.strategy_name for us in user_strategies]
+        
+        return {
+            'id': user.id,
+            'username': user.username,
+            'is_superuser': user.is_superuser,
+            'is_active': user.is_active,
+            'created_time': user.created_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'last_login_time': user.last_login_time.strftime('%Y-%m-%d %H:%M:%S') if user.last_login_time else '从未登录',
+            'last_activity_time': user.last_activity_time.strftime('%Y-%m-%d %H:%M:%S') if user.last_activity_time else '无活跃记录',
+            'login_count': user.login_count,
+            'has_private_key': bool(user.private_key),
+            'has_public_key': bool(user.public_key),
+            'strategies': strategies_list,
+            'strategy_count': len(strategies_list)
+        }
+    
+    @staticmethod
+    def get_all_users_for_superuser():
+        """获取所有用户列表（包括非活跃用户，仅超级管理员可查看）"""
         # MySQL 兼容的排序语法，使用 ISNULL 函数将 NULL 值排到最后
-        users = User.query.filter_by(is_active=True).order_by(
+        users = User.query.order_by(
+            User.is_active.desc(),  # 活跃用户排在前面
             db.text('ISNULL(last_activity_time), last_activity_time DESC'),
             db.text('ISNULL(last_login_time), last_login_time DESC')
         ).all()
         
         result = []
         for user in users:
+            # 获取用户的策略信息
+            user_strategies = UserStrategy.query.filter_by(
+                user_id=user.id,
+                is_active=True
+            ).all()
+            
+            strategies_list = [us.strategy_name for us in user_strategies]
+            
             user_info = {
                 'id': user.id,
                 'username': user.username,
                 'is_superuser': user.is_superuser,
+                'is_active': user.is_active,
                 'created_time': user.created_time.strftime('%Y-%m-%d %H:%M:%S'),
                 'last_login_time': user.last_login_time.strftime('%Y-%m-%d %H:%M:%S') if user.last_login_time else '从未登录',
                 'last_activity_time': user.last_activity_time.strftime('%Y-%m-%d %H:%M:%S') if user.last_activity_time else '无活跃记录',
                 'login_count': user.login_count,
                 'has_private_key': bool(user.private_key),
-                'has_public_key': bool(user.public_key)
+                'has_public_key': bool(user.public_key),
+                'strategies': strategies_list,
+                'strategy_count': len(strategies_list)
             }
             result.append(user_info)
         

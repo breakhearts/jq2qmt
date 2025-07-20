@@ -252,6 +252,31 @@
             color: #333;
         }
         
+        .strategy-list {
+            max-width: 200px;
+        }
+        
+        .strategy-badge {
+            margin: 2px;
+            font-size: 0.7rem;
+        }
+        
+        .strategy-checkbox {
+            margin: 0.5rem 0;
+        }
+        
+        .strategy-checkbox label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .strategy-count-warning {
+            color: #dc3545;
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+        
         @media (max-width: 768px) {
             .container {
                 padding: 0 1rem;
@@ -322,6 +347,8 @@
                             <th>权限</th>
                             <th>状态</th>
                             <th>密钥状态</th>
+                            <th>订阅策略</th>
+                            <th>策略数量</th>
                             <th>创建时间</th>
                             <th>最后登录</th>
                             <th>最后活跃</th>
@@ -357,6 +384,22 @@
                                     <span class="badge badge-danger">未配置</span>
                                 {% endif %}
                             </td>
+                            <td>
+                                {% if user.strategies %}
+                                    <div class="strategy-list">
+                                        {% for strategy in user.strategies %}
+                                            <span class="badge badge-primary strategy-badge">{{ strategy }}</span>
+                                        {% endfor %}
+                                    </div>
+                                {% else %}
+                                    <span class="text-muted">无订阅</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <span class="badge {% if user.strategy_count >= 5 %}badge-danger{% elif user.strategy_count >= 3 %}badge-warning{% else %}badge-success{% endif %}">
+                                    {{ user.strategy_count }}/5
+                                </span>
+                            </td>
                             <td>{{ user.created_time }}</td>
                             <td>{{ user.last_login_time }}</td>
                             <td>{{ user.last_activity_time }}</td>
@@ -364,6 +407,11 @@
                             <td>
                                 <button class="btn btn-warning" onclick="editUser('{{ user.username }}')">编辑</button>
                                 {% if not user.is_superuser %}
+                                    {% if user.is_active %}
+                                        <button class="btn btn-secondary" onclick="toggleUserStatus('{{ user.username }}', false)">禁用</button>
+                                    {% else %}
+                                        <button class="btn btn-success" onclick="toggleUserStatus('{{ user.username }}', true)">启用</button>
+                                    {% endif %}
                                 <button class="btn btn-danger" onclick="deleteUser('{{ user.username }}')">删除</button>
                                 {% endif %}
                             </td>
@@ -405,6 +453,35 @@
         </div>
     </div>
     
+    <!-- 编辑用户模态框 -->
+    <div id="editUserModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('editUserModal')">&times;</span>
+            <h2>编辑用户</h2>
+            <form id="editUserForm">
+                <div class="form-group">
+                    <label>用户名</label>
+                    <input type="text" id="edit_username" readonly style="background-color: #f5f5f5;">
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="edit_is_active"> 用户状态（勾选为活跃）
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>订阅策略（最多5个）</label>
+                    <div id="strategies_container">
+                        <!-- 策略复选框将在这里动态生成 -->
+                    </div>
+                    <div class="strategy-count-warning" id="strategy_count_warning" style="display: none;">
+                        已选择超过5个策略，请减少选择！
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">保存更改</button>
+            </form>
+        </div>
+    </div>
+    
     <script>
         function showCreateUserModal() {
             document.getElementById('createUserModal').style.display = 'block';
@@ -415,8 +492,132 @@
         }
         
         function editUser(username) {
-            // 这里可以添加编辑用户的逻辑
-            alert('编辑用户功能待实现: ' + username);
+            // 获取用户信息
+            fetch(`/users/edit/${username}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert('获取用户信息失败: ' + data.error);
+                        return;
+                    }
+                    
+                    // 填充表单
+                    document.getElementById('edit_username').value = username;
+                    document.getElementById('edit_is_active').checked = data.user.is_active;
+                    
+                    // 生成策略复选框
+                    const container = document.getElementById('strategies_container');
+                    container.innerHTML = '';
+                    
+                    data.all_strategies.forEach(strategy => {
+                        const div = document.createElement('div');
+                        div.className = 'strategy-checkbox';
+                        
+                        const label = document.createElement('label');
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.value = strategy;
+                        checkbox.name = 'strategies';
+                        checkbox.checked = data.user.strategies.includes(strategy);
+                        
+                        // 添加策略数量限制检查
+                        checkbox.addEventListener('change', checkStrategyLimit);
+                        
+                        label.appendChild(checkbox);
+                        label.appendChild(document.createTextNode(strategy));
+                        div.appendChild(label);
+                        container.appendChild(div);
+                    });
+                    
+                    // 显示模态框
+                    document.getElementById('editUserModal').style.display = 'block';
+                })
+                .catch(error => {
+                    alert('获取用户信息失败: ' + error);
+                });
+        }
+        
+        function checkStrategyLimit() {
+            const checkboxes = document.querySelectorAll('input[name="strategies"]:checked');
+            const warning = document.getElementById('strategy_count_warning');
+            
+            if (checkboxes.length > 5) {
+                warning.style.display = 'block';
+                // 禁用未选中的复选框
+                document.querySelectorAll('input[name="strategies"]:not(:checked)').forEach(cb => {
+                    cb.disabled = true;
+                });
+            } else {
+                warning.style.display = 'none';
+                // 启用所有复选框
+                document.querySelectorAll('input[name="strategies"]').forEach(cb => {
+                    cb.disabled = false;
+                });
+            }
+        }
+        
+        // 处理编辑用户表单提交
+        document.getElementById('editUserForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('edit_username').value;
+            const isActive = document.getElementById('edit_is_active').checked;
+            const selectedStrategies = Array.from(document.querySelectorAll('input[name="strategies"]:checked'))
+                .map(cb => cb.value);
+            
+            if (selectedStrategies.length > 5) {
+                alert('每个用户最多只能订阅5个策略');
+                return;
+            }
+            
+            fetch('/users/update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    username: username,
+                    is_active: isActive,
+                    strategies: selectedStrategies
+                })
+            }).then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('更新用户失败: ' + data.error);
+                } else {
+                    alert(data.message);
+                    closeModal('editUserModal');
+                    location.reload();
+                }
+            }).catch(error => {
+                alert('更新用户失败: ' + error);
+            });
+        });
+        
+        function toggleUserStatus(username, isActive) {
+            const action = isActive ? '启用' : '禁用';
+            if (confirm(`确定要${action}用户 ${username} 吗？`)) {
+                fetch('/users/update', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        is_active: isActive
+                        // 不传递strategies参数，保持用户策略不变
+                    })
+                }).then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(`${action}用户失败: ` + data.error);
+                    } else {
+                        location.reload();
+                    }
+                }).catch(error => {
+                    alert(`${action}用户失败: ` + error);
+                });
+            }
         }
         
         function deleteUser(username) {
