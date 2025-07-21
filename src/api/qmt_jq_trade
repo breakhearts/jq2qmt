@@ -28,6 +28,8 @@ class G():
         self.strategy_names = [
             'hand_strategy'
         ]
+        # 手动持仓白名单，第一次运行及每日9:15刷新
+        self.whitelist_positions = set()
 
 g = G()
 
@@ -297,6 +299,10 @@ class QMTAPI:
         
         filtered_current_positions = {}
         for code, info in current_positions.items():
+            # 跳过手动持仓
+            if code in g.whitelist_positions:
+                filtered_current_codes.append((code, "手动持仓", info['volume']))
+                continue
             should_filter, reason = self._should_filter_position(code)
             if should_filter:
                 filtered_current_codes.append((code, reason, info['volume']))
@@ -558,6 +564,21 @@ def cancel_scheduled_task(task_id):
         return True
     return False
 
+def refresh_whitelist(ContextInfo):
+    """获取并更新手动持仓白名单"""
+    try:
+        # 查询当前所有持仓
+        qmt_positions = get_trade_detail_data(g.account, 'STOCK', 'POSITION')
+        codes = {f"{p.m_strInstrumentID}.{p.m_strExchangeID}" for p in qmt_positions}
+        g.whitelist_positions = codes
+        print(f"已获取手动持仓白名单: {codes}")
+    except Exception as e:
+        print(f"刷新手动持仓失败: {e}")
+    # 安排下一次刷新（明日9:15）
+    next_time = datetime.now() + timedelta(days=1)
+    next_time = next_time.replace(hour=9, minute=15, second=0, microsecond=0)
+    schedule_run(ContextInfo, refresh_whitelist, next_time)
+
 DEBUG = False
 
 # 修改原有的adjust函数
@@ -598,3 +619,15 @@ def init(ContextInfo):
     print(f"设置第一次运行时间:{g.first_run}")
     # 设置调度，从first_run开始运行
     schedule_run(ContextInfo, adjust, g.first_run)
+    # 初始刷新手动持仓并安排每日9:15刷新
+    try:
+        refresh_whitelist(ContextInfo)
+        # 计算首次刷新时间：今天9:15或明天9:15
+        cur_time = now.time()
+        if cur_time <= datetime.strptime("09:15:00", "%H:%M:%S").time():
+            first_whitelist = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        else:
+            first_whitelist = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+        schedule_run(ContextInfo, refresh_whitelist, first_whitelist)
+    except Exception as e:
+        print(f"安排手动持仓刷新失败: {e}")

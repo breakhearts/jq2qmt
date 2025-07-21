@@ -145,6 +145,11 @@ class MiniQmtTrade:
         if self.redis_enabled:
             self._init_redis()
 
+        # 新增：初始化忽略股票列表相关字段
+        self.ignored_stocks = set()
+        self.first_run_done = False
+        self.last_ignore_refresh_date = None
+
     def _init_redis(self):
         """初始化Redis连接和订阅"""
         try:
@@ -307,10 +312,33 @@ class MiniQmtTrade:
             print(f'获取总持仓错误: {e}')
             return {'positions': [], 'update_time': None}
 
+    def _refresh_ignored_stocks(self):
+        """刷新需要忽略的持仓，排除信号外的股票"""
+        try:
+            print("Refreshing ignored stocks (first run or daily 9:15)")
+            current_positions = self._get_current_positions()
+            codes = set(current_positions.keys())
+            total_data = self.get_total_positions()
+            target_codes = set(pos['code'] for pos in total_data.get('positions', []))
+            # 忽略当前持仓中不在目标持仓中的股票
+            self.ignored_stocks = codes - target_codes
+            if self.ignored_stocks:
+                print(f"Ignoring non-signal stocks: {self.ignored_stocks}")
+        except Exception as e:
+            print(f"Failed to refresh ignored stocks: {e}")
+
     def sync_positions(self):
         """同步持仓"""
         current_time = time.time()
-        
+
+        # 新增：首次运行或每天9:15刷新忽略列表
+        now = datetime.now()
+        today = now.date()
+        if not self.first_run_done or (self.last_ignore_refresh_date != today and now.hour == 9 and now.minute >= 15):
+            self._refresh_ignored_stocks()
+            self.first_run_done = True
+            self.last_ignore_refresh_date = today
+
         # Redis模式下避免过于频繁的同步
         if self.redis_enabled and self.last_sync_time:
             time_since_last_sync = current_time - self.last_sync_time
@@ -383,6 +411,12 @@ class MiniQmtTrade:
 
     def _execute_position_sync(self, current_positions, target_positions):
         """执行持仓同步逻辑"""
+
+        # 新增：跳过忽略的股票
+        for code in list(current_positions.keys()):
+            if code in self.ignored_stocks:
+                current_positions.pop(code, None)
+        target_positions = [pos for pos in target_positions if pos.get('code') not in self.ignored_stocks]
 
         # 处理目标持仓
         target_dict = {}
