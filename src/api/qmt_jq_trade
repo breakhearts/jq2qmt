@@ -26,10 +26,8 @@ class G():
         self.strategy_names = [
             'hand_strategy'
         ]
-        self.filtered_stocks = set()  # 当天过滤的股票列表（停牌、涨停、跌停）
 
 g = G()
-
 
 class QMTAPI:
     def __init__(self, C, strategy_names=None):
@@ -333,15 +331,7 @@ class QMTAPI:
         differences = {}
         all_codes = set(filtered_db_positions.keys()) | set(filtered_current_positions.keys())
         
-        # 记录被过滤的股票
-        filtered_by_trade_status = []
-        
         for code in all_codes:
-            # 检查是否在当天过滤列表中
-            if code in g.filtered_stocks:
-                filtered_by_trade_status.append(code)
-                continue
-                
             target_vol = filtered_db_positions.get(code, 0)
             current_pos = filtered_current_positions.get(code, {'volume': 0, 'available': 0})
             diff = current_pos['volume'] - target_vol
@@ -353,10 +343,6 @@ class QMTAPI:
                     'available': current_pos['available'],
                     'diff': diff
                 }
-        
-        # 打印被交易状态过滤的股票
-        if filtered_by_trade_status:
-            print(f"\n=== 交易状态过滤的股票 ===\n当天已过滤股票（停牌/涨停/跌停）: {', '.join(sorted(filtered_by_trade_status))}\n=== 过滤结束 ===\n")
         
         # 打印差异
         print(f"\n=== Position Differences ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===")
@@ -443,16 +429,13 @@ class QMTAPI:
         pure_code = self._get_pure_code(code)
         data = self.C.get_instrumentdetail(code)
         if data["InstrumentStatus"] > 0:
-            print(f"股票 {code} 停牌，加入当天过滤列表")
-            g.filtered_stocks.add(code)
+            print(f"股票 {code} 停牌，无法下单")
             return
         if price == data["UpStopPrice"] and direction == 'buy':
-            print(f"股票 {code} 达到涨停价格，加入当天过滤列表")
-            g.filtered_stocks.add(code)
+            print(f"股票 {code} 达到涨停价格，无法下买单")
             return
         if price == data["DownStopPrice"] and direction == 'sell':
-            print(f"股票 {code} 达到跌停价格，加入当天过滤列表")
-            g.filtered_stocks.add(code)
+            print(f"股票 {code} 达到跌停价格，无法下卖单")
             return
             
         # 获取价格精度
@@ -478,7 +461,6 @@ class QMTAPI:
                 order_price = calculated_price
                 print(f"使用计算价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
             op_type = 24  # 卖出
-        
         # 如果是买入单，检查资金是否足够
         if direction == 'buy':
             # 获取账户资金信息
@@ -638,10 +620,6 @@ def init(ContextInfo):
     
     # 初始化latest_update_time为当天的0点
     now = datetime.now()
-    
-    # 清空当天过滤列表
-    g.filtered_stocks.clear()
-    print("已清空当天股票过滤列表")
     
     # 计算今天的9:30
     current_time = now.time()
