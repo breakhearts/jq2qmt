@@ -47,9 +47,23 @@
             border: none;
             border-radius: 4px;
             cursor: pointer;
+            margin-right: 10px;
         }
         .refresh-btn:hover {
             background-color: #45a049;
+        }
+        .refresh-strategies-btn {
+            margin-bottom: 20px;
+            padding: 10px 20px;
+            background-color: #ff9800;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .refresh-strategies-btn:hover {
+            background-color: #e68900;
         }
         .total-positions {
             margin-bottom: 30px;
@@ -75,6 +89,13 @@
             border-radius: 4px;
             margin-bottom: 20px;
         }
+        .success {
+            color: #155724;
+            padding: 10px;
+            background-color: #d4edda;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
         .negative-volume {
             color: #dc3545;
             font-weight: bold;
@@ -82,6 +103,48 @@
         .positive-volume {
             color: #28a745;
             font-weight: bold;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.4);
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 15% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            border-radius: 5px;
+            width: 300px;
+            text-align: center;
+        }
+        .modal-input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .modal-btn {
+            padding: 10px 20px;
+            margin: 5px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .modal-btn-confirm {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .modal-btn-cancel {
+            background-color: #f44336;
+            color: white;
         }
     </style>
 </head>
@@ -92,8 +155,11 @@
             <a href="/adjustment" style="margin-right: 15px; color: #007bff; text-decoration: none; font-size: 16px;">持仓调整 →</a>
             <a href="/password" style="margin-right: 15px; color: #007bff; text-decoration: none; font-size: 16px;">密码管理 →</a>
             <button class="refresh-btn" onclick="refreshData()">刷新数据</button>
+            <button class="refresh-strategies-btn" onclick="showRefreshStrategiesModal()">刷新策略时间</button>
         </div>
     </div>
+    
+    <div id="message-container"></div>
     
     <div class="total-positions">
         <h2 class="section-title">总持仓</h2>
@@ -112,6 +178,19 @@
     
     <h2 class="section-title">策略明细</h2>
     <div id="positions-container"></div>
+
+    <!-- 密码确认模态框 -->
+    <div id="passwordModal" class="modal">
+        <div class="modal-content">
+            <h3>验证密码</h3>
+            <p>刷新策略时间需要验证内部密码</p>
+            <input type="password" id="passwordInput" class="modal-input" placeholder="请输入内部密码">
+            <div>
+                <button class="modal-btn modal-btn-confirm" onclick="confirmRefreshStrategies()">确认</button>
+                <button class="modal-btn modal-btn-cancel" onclick="hideRefreshStrategiesModal()">取消</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         async function fetchData() {
@@ -179,6 +258,20 @@
             `).join('');
         }
 
+        function showMessage(message, type = 'success') {
+            const container = document.getElementById('message-container');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = type;
+            messageDiv.textContent = message;
+            container.innerHTML = '';
+            container.appendChild(messageDiv);
+            
+            // 3秒后自动隐藏消息
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 3000);
+        }
+
         async function refreshData() {
             const container = document.getElementById('positions-container');
             container.innerHTML = '<div class="loading">加载中...</div>';
@@ -192,11 +285,72 @@
             }
         }
 
+        function showRefreshStrategiesModal() {
+            document.getElementById('passwordModal').style.display = 'block';
+            document.getElementById('passwordInput').value = '';
+            document.getElementById('passwordInput').focus();
+        }
+
+        function hideRefreshStrategiesModal() {
+            document.getElementById('passwordModal').style.display = 'none';
+        }
+
+        async function confirmRefreshStrategies() {
+            const password = document.getElementById('passwordInput').value;
+            
+            if (!password) {
+                showMessage('请输入密码', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/v1/strategies/refresh', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Internal-Password': password
+                    },
+                    body: JSON.stringify({})
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    showMessage(`${result.message}，更新时间：${result.update_time}`, 'success');
+                    hideRefreshStrategiesModal();
+                    // 刷新页面数据
+                    setTimeout(() => {
+                        refreshData();
+                    }, 1000);
+                } else {
+                    showMessage(result.error || '刷新失败', 'error');
+                }
+            } catch (error) {
+                console.error('刷新策略时间失败:', error);
+                showMessage('刷新策略时间失败，请稍后重试', 'error');
+            }
+        }
+
         // 页面加载完成后自动刷新数据
         document.addEventListener('DOMContentLoaded', refreshData);
 
         // 每60秒自动刷新一次数据
         setInterval(refreshData, 60000);
+
+        // 点击模态框外部关闭模态框
+        window.onclick = function(event) {
+            const modal = document.getElementById('passwordModal');
+            if (event.target === modal) {
+                hideRefreshStrategiesModal();
+            }
+        }
+
+        // 在密码输入框中按回车键确认
+        document.getElementById('passwordInput').addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                confirmRefreshStrategies();
+            }
+        });
     </script>
 </body>
 </html>

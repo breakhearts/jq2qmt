@@ -148,6 +148,136 @@ class StrategyPosition(db.Model):
             'positions': list(filtered_positions.values()),
             'update_time': latest_update_time
         }
+    
+    @staticmethod
+    def get_total_positions_with_coefficients(parsed_strategies=None, include_adjustments=True):
+        """
+        获取带系数的总持仓，支持策略名带系数（如：策略名x0.1）
+        最终持仓按最小单位100股进行四舍五入处理
+        """
+        import math
+        
+        # 如果没有指定策略，使用原有逻辑
+        if not parsed_strategies:
+            return StrategyPosition.get_total_positions(None, include_adjustments)
+        
+        # 提取策略名列表
+        strategy_names = [s['name'] for s in parsed_strategies]
+        
+        # 获取策略数据
+        all_strategies = StrategyPosition.query.filter(
+            StrategyPosition.strategy_name.in_(strategy_names)
+        ).all()
+        
+        # 创建策略名到系数的映射
+        coefficient_map = {s['name']: s['coefficient'] for s in parsed_strategies}
+        
+        total_positions = {}
+        # 设置默认的最早开始时间
+        latest_update_time = datetime(1970, 1, 1)
+        
+        for strategy in all_strategies:
+            # 更新最新时间
+            if latest_update_time is None or strategy.update_time > latest_update_time:
+                latest_update_time = strategy.update_time
+            
+            # 获取该策略的系数
+            coefficient = coefficient_map.get(strategy.strategy_name, 1.0)
+                
+            for pos in strategy.positions:
+                code = pos['code']
+                if code not in total_positions:
+                    total_positions[code] = {
+                        'code': code,
+                        'name': pos.get('name', code),  # 使用股票名称，如果没有则使用代码
+                        'total_volume': 0,
+                        'total_cost': 0
+                    }
+                
+                # 应用系数
+                adjusted_volume = pos['volume'] * coefficient
+                
+                # 对于调整策略，直接加减持仓数量和成本
+                if strategy.strategy_name.startswith('ADJUSTMENT_'):
+                    total_positions[code]['total_volume'] += adjusted_volume
+                    total_positions[code]['total_cost'] += adjusted_volume * pos['cost']
+                else:
+                    total_positions[code]['total_volume'] += adjusted_volume
+                    total_positions[code]['total_cost'] += adjusted_volume * pos['cost']
+        
+        # 计算平均成本并过滤掉持仓为0的股票，同时进行最小单位处理
+        filtered_positions = {}
+        for code in total_positions:
+            original_volume = total_positions[code]['total_volume']
+            
+            # 按最小单位100股进行向下取整
+            if original_volume != 0:
+                # 向下取整到最近的100股
+                rounded_volume = int(original_volume / 100) * 100
+                
+                # 如果向下取整后为0，但原始持仓不为0，则跳过
+                if rounded_volume == 0:
+                    continue
+                
+                total_positions[code]['total_volume'] = int(rounded_volume)
+                
+                if total_positions[code]['total_volume'] > 0:
+                    total_positions[code]['avg_cost'] = (
+                        total_positions[code]['total_cost'] / 
+                        original_volume  # 使用原始持仓计算平均成本
+                    )
+                else:
+                    # 负持仓的情况，显示平均成本
+                    total_positions[code]['avg_cost'] = (
+                        total_positions[code]['total_cost'] / 
+                        original_volume  # 使用原始持仓计算平均成本
+                    )
+                del total_positions[code]['total_cost']
+                filtered_positions[code] = total_positions[code]
+        
+        return {
+            'positions': list(filtered_positions.values()),
+            'update_time': latest_update_time
+        }
+
+    @staticmethod
+    def refresh_all_strategies_time():
+        """刷新所有有效策略的更新时间为当前时间"""
+        try:
+            # 获取所有策略
+            strategies = StrategyPosition.query.all()
+            
+            if not strategies:
+                return {
+                    'success': False,
+                    'message': '没有找到任何策略',
+                    'updated_count': 0
+                }
+            
+            # 更新所有策略的时间
+            current_time = datetime.now()
+            updated_count = 0
+            
+            for strategy in strategies:
+                strategy.update_time = current_time
+                updated_count += 1
+            
+            db.session.commit()
+            
+            return {
+                'success': True,
+                'message': f'成功刷新了 {updated_count} 个策略的时间',
+                'updated_count': updated_count,
+                'update_time': current_time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+        except Exception as e:
+            db.session.rollback()
+            return {
+                'success': False,
+                'message': f'刷新策略时间失败: {str(e)}',
+                'updated_count': 0
+            }
 
 
 class InternalPassword(db.Model):

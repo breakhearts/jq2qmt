@@ -1,12 +1,16 @@
-#coding:gbk
+#coding:utf-8
 
 import requests
 from typing import Dict, List
 from datetime import datetime, timedelta
 import time
 from enum import Enum
+from xtquant import xtdata, xttrader
+from xtquant.xttype import StockAccount
+from xtquant import xtconstant
+from xtquant.xttrader import XtQuantTraderCallback
 
-class WaitngOrderStatus(Enum):
+class WaitingOrderStatus(Enum):
     COMPLETED = "COMPLETED"         # 所有订单已完成
     NEED_REPLACE = "NEED_REPLACE"   # 有订单已撤单，需要重新下单
     PENDING_CANCEL = "PENDING"      # 有订单等待交易所处理
@@ -26,16 +30,80 @@ class G():
         self.strategy_names = [
             'hand_strategy'
         ]
+        self.account = None
+        self.trader = None
+        self.account_id = None
 
 g = G()
 
-class QMTAPI:
-    def __init__(self, C, strategy_names=None):
+
+class MiniQMTTraderCallback(XtQuantTraderCallback):
+    """交易回调类"""
+    
+    def on_disconnected(self):
+        """连接断开"""
+        print("交易连接已断开")
+    
+    def on_stock_order(self, order):
+        """委托回调"""
+        print(f"委托回调: {order.stock_code} {order.order_status} {order.order_volume}")
+    
+    def on_stock_asset(self, asset):
+        """资金变动回调"""
+        print(f"资金变动: 可用资金 {asset.cash}")
+    
+    def on_stock_trade(self, trade):
+        """成交回调"""
+        print(f"成交回调: {trade.stock_code} {trade.traded_volume} {trade.traded_price}")
+    
+    def on_stock_position(self, position):
+        """持仓变动回调"""
+        print(f"持仓变动: {position.stock_code} {position.volume}")
+
+
+class MiniQMTAPI:
+    def __init__(self, account_id: str, strategy_names=None):
         self.api_url = API_URL
-        self.C = C
+        self.account_id = account_id
         self.strategy_names = strategy_names
+        self.trader = None
+        self.callback = MiniQMTTraderCallback()
+        self._init_trader()
+    
+    def _init_trader(self):
+        """初始化交易连接"""
+        try:
+            # 创建交易连接
+            self.trader = xttrader.XtQuantTrader()
+            
+            # 注册回调
+            self.trader.register_callback(self.callback)
+            
+            # 启动交易连接
+            self.trader.start()
+            
+            # 连接账户
+            account = StockAccount(self.account_id)
+            connect_result = self.trader.connect()
+            if connect_result != 0:
+                print(f"交易连接失败: {connect_result}")
+                return False
+            
+            # 订阅账户
+            subscribe_result = self.trader.subscribe(account)
+            if subscribe_result != 0:
+                print(f"账户订阅失败: {subscribe_result}")
+                return False
+            
+            print(f"MiniQMT交易连接成功，账户: {self.account_id}")
+            return True
+            
+        except Exception as e:
+            print(f"初始化MiniQMT交易连接失败: {str(e)}")
+            return False
     
     def get_total_positions(self) -> Dict:
+        """获取目标持仓数据（从API服务器）"""
         try:
             url = f'{self.api_url}/api/v1/positions/total'
             if self.strategy_names:
@@ -60,7 +128,8 @@ class QMTAPI:
             print(f'获取总持仓其他错误: {str(e)}')
             return {'positions': [], 'update_time': None}
 
-    def sync_positions(self, account: str):
+    def sync_positions(self):
+        """同步持仓"""
         # 获取最新数据和更新时间
         total_data = self.get_total_positions()
         current_update_time = total_data.get('update_time')
@@ -80,7 +149,7 @@ class QMTAPI:
             print(f"存在{current_update_time}未同步的仓位，本轮只进行持仓对比，不执行下单操作")
             
             # 只检查持仓一致性，不进行下单
-            differences = self.check_positions_consistency(account)
+            differences = self.check_positions_consistency()
             
             if differences:
                 print("\n=== 持仓差异详情 ===")
@@ -104,24 +173,24 @@ class QMTAPI:
         while max_sync_positions > 0:
             max_sync_positions -= 1
             max_orders_complete_retry = 10  # 添加最大重试次数
-            status = WaitngOrderStatus.ERROR
+            status = WaitingOrderStatus.ERROR
             while max_orders_complete_retry > 0:
                 max_orders_complete_retry -= 1
                 # 检查是否需要取消订单
                 status = self.try_orders_complete()
-                if status == WaitngOrderStatus.COMPLETED:
+                if status == WaitingOrderStatus.COMPLETED:
                     break
-                elif status == WaitngOrderStatus.NEED_REPLACE:
+                elif status == WaitingOrderStatus.NEED_REPLACE:
                     print(f"有订单撤销，等待待撤订单状态更新,等待{g.check_orders_interval}秒后重试...")
                     continue                   
-                elif status == WaitngOrderStatus.PENDING_CANCEL:
+                elif status == WaitingOrderStatus.PENDING_CANCEL:
                     print(f"等待未报和待撤订单状态更新,等待{g.check_orders_interval}秒后重试...")
                     continue
-                elif status == WaitngOrderStatus.ERROR:
+                elif status == WaitingOrderStatus.ERROR:
                     print("检查订单状态时发生错误，跳过本次同步")
                     break
-            if status != WaitngOrderStatus.ERROR and max_orders_complete_retry > 0:       
-                differences = self.check_positions_consistency(account)
+            if status != WaitingOrderStatus.ERROR and max_orders_complete_retry > 0:       
+                differences = self.check_positions_consistency()
                 print(f"\n=== 同步下单:{10 - max_sync_positions} ===")
                 # 将差异分为卖出和买入两组
                 sell_orders = {}
@@ -165,80 +234,77 @@ class QMTAPI:
         g.latest_update_time = current_update_time
         print(f"=== 持仓同步结束 (更新时间: {g.latest_update_time}) ===\n")
 
-
     def try_orders_complete(self):
+        """检查订单状态"""
         print("\n*** 订单状态检查 ***")
         time.sleep(g.check_orders_interval)
-        # 获取所有委托        
-        orders = get_trade_detail_data(g.account, 'STOCK', 'ORDER', g.strategy_name)
-        orders = [
-            order for order in orders 
-            if order.m_nOrderStatus not in [56, 57,  53, 54]  # 已成，废单，部撤，已撤
-        ]
-        print("\n当前所有订单状态：")
-        print(f"{'订单编号':<12} {'代码':<10} {'名称':<8} {'方向':<6} {'委托类别':<8} {'总数量':>8} {'成交量':>8} "
-              f"{'价格':>8} {'状态':>6} {'备注':<20}")
-        print("-" * 98)
-        for order in orders:
-            direction = "买入" if order.m_nOffsetFlag == 48 else "卖出"
-            print(f"{order.m_strOrderSysID:<12} {order.m_strInstrumentID:<10} "
-                  f"{order.m_strInstrumentName[:8]:<8} {direction:<6} "
-                  f"{order.m_eEntrustType:<8} {order.m_nVolumeTotalOriginal:>8} {order.m_nVolumeTraded:>8} "
-                  f"{order.m_dLimitPrice:>8.2f} {order.m_nOrderStatus:>6} "
-                  f"{order.m_strRemark[:20]:<20}")
-        if not orders:
-            print("没有未完成订单")
-            return WaitngOrderStatus.COMPLETED
         
-        # 先检查是否有待交易所处理的订单
-        pending_orders = [
-            order for order in orders 
-            if order.m_nOrderStatus in [49, 51, 52]  # 待报、已报待撤、部成待撤
-        ]
-        if pending_orders:
-            print("存在待交易所处理的订单，等待处理完成")
-            for order in pending_orders:
-                print(f"  - {order.m_strOrderSysID}: 状态{order.m_nOrderStatus}")
-            return WaitngOrderStatus.PENDING_CANCEL
-
-        # 需要取消的状态列表
-        cancel_states = [50, 55]  # 待报、已报、部成
-        
-        # 筛选需要取消的委托，排除申购订单
-        orders_to_cancel = [
-            order for order in orders 
-            if order.m_nOrderStatus in cancel_states
-        ]
-        if not orders_to_cancel:  # 添加这个判断
-            print("没有需要撤销的订单, 可能有异常状态的订单")
-            return WaitngOrderStatus.ERROR
-
-        has_cancelled = False  # 标记是否有已撤单待重新下单的订单
-
-        for order in orders_to_cancel:
-            print(f"正在撤销订单: {order.m_strOrderSysID} - "
-                    f"{order.m_strInstrumentID} "
-                    f"(状态: {order.m_nOrderStatus})")
+        try:
+            # 获取所有委托
+            account = StockAccount(self.account_id)
+            orders = self.trader.query_stock_orders(account)
             
-            # 记录未完成数量和方向
-            remaining_volume = order.m_nVolumeTotalOriginal - order.m_nVolumeTraded
-            direction = "buy" if order.m_nOffsetFlag == 48 else "sell"
-            "sell"
-            print(f"订单剩余数量: {remaining_volume} 股 (总量: {order.m_nVolumeTotalOriginal}, "
-                  f"已成交: {order.m_nVolumeTraded}), 方向: {direction}")
-            # 执行撤单
-            if cancel(order.m_strOrderSysID, g.account, 'STOCK', self.C):
-                print(f"撤销成功:{order.m_strOrderSysID}")
-                has_cancelled = True
+            # 过滤未完成订单
+            pending_orders = [
+                order for order in orders 
+                if order.order_status not in [xtconstant.ORDER_STATUS_ALLTRADED, 
+                                             xtconstant.ORDER_STATUS_CANCELED,
+                                             xtconstant.ORDER_STATUS_REJECTED]
+            ]
+            
+            print("\n当前所有订单状态：")
+            print(f"{'订单编号':<12} {'代码':<10} {'方向':<6} {'总数量':>8} {'成交量':>8} "
+                  f"{'价格':>8} {'状态':>6}")
+            print("-" * 70)
+            
+            for order in pending_orders:
+                direction = "买入" if order.order_type == xtconstant.STOCK_BUY else "卖出"
+                print(f"{order.order_id:<12} {order.stock_code:<10} "
+                      f"{direction:<6} {order.order_volume:>8} {order.traded_volume:>8} "
+                      f"{order.price:>8.2f} {order.order_status:>6}")
+            
+            if not pending_orders:
+                print("没有未完成订单")
+                return WaitingOrderStatus.COMPLETED
+            
+            # 检查是否有待交易所处理的订单
+            waiting_orders = [
+                order for order in pending_orders 
+                if order.order_status in [xtconstant.ORDER_STATUS_NEW, 
+                                         xtconstant.ORDER_STATUS_PARTTRADED]
+            ]
+            
+            if waiting_orders:
+                print("存在待交易所处理的订单，等待处理完成")
+                for order in waiting_orders:
+                    print(f"  - {order.order_id}: 状态{order.order_status}")
+                return WaitingOrderStatus.PENDING_CANCEL
+
+            # 撤销所有未完成订单
+            has_cancelled = False
+            for order in pending_orders:
+                print(f"正在撤销订单: {order.order_id} - {order.stock_code} "
+                      f"(状态: {order.order_status})")
+                
+                # 执行撤单
+                cancel_result = self.trader.cancel_order_stock(account, order.order_id)
+                if cancel_result == 0:
+                    print(f"撤销成功:{order.order_id}")
+                    has_cancelled = True
+                else:
+                    print(f"撤销订单失败: {order.order_id}, 错误码: {cancel_result}")
+                    return WaitingOrderStatus.ERROR
+            
+            if has_cancelled:
+                print("已撤销部分订单，等待重新下单")
+                return WaitingOrderStatus.NEED_REPLACE
             else:
-                print(f"撤销订单失败: {order.m_strOrderSysID}")
-                return WaitngOrderStatus.ERROR
-        if has_cancelled:
-            print("已撤销部分订单，等待重新下单")
-            return WaitngOrderStatus.NEED_REPLACE
-        else:
-            print("发现异常状态的订单")
-            return WaitngOrderStatus.ERROR
+                print("发现异常状态的订单")
+                return WaitingOrderStatus.ERROR
+                
+        except Exception as e:
+            print(f"检查订单状态异常: {str(e)}")
+            return WaitingOrderStatus.ERROR
 
     def _should_filter_position(self, code: str):
         """判断是否应该过滤该持仓
@@ -269,22 +335,28 @@ class QMTAPI:
             
         return False, ""
 
-    def check_positions_consistency(self, account: str) -> Dict[str, Dict]:
+    def check_positions_consistency(self) -> Dict[str, Dict]:
+        """检查持仓一致性"""
         # 获取数据库目标持仓
         db_positions = {
             self._convert_jq_code_to_qmt(pos['code']): pos['total_volume']
-            for pos in self.get_total_positions()['positions']  # 修改这里以适应新的返回格式
+            for pos in self.get_total_positions()['positions']
         }
         
-        # 获取QMT实际持仓
-        qmt_positions = get_trade_detail_data(account, 'STOCK', 'POSITION')
-        current_positions = {
-            f"{p.m_strInstrumentID}.{p.m_strExchangeID}": {
-                'volume': p.m_nVolume,
-                'available': p.m_nCanUseVolume
+        # 获取MiniQMT实际持仓
+        try:
+            account = StockAccount(self.account_id)
+            qmt_positions_data = self.trader.query_stock_positions(account)
+            current_positions = {
+                position.stock_code: {
+                    'volume': position.volume,
+                    'available': position.can_use_volume
+                }
+                for position in qmt_positions_data
             }
-            for p in qmt_positions
-        }
+        except Exception as e:
+            print(f"获取MiniQMT持仓失败: {str(e)}")
+            current_positions = {}
         
         # 记录过滤的持仓
         filtered_db_codes = []
@@ -319,7 +391,7 @@ class QMTAPI:
                     print(f"{code:<12} {reason:<12} {volume:>8}")
             
             if filtered_current_codes:
-                print("\n【本地持仓（QMT实际持仓）】")
+                print("\n【本地持仓（MiniQMT实际持仓）】")
                 print(f"{'代码':<12} {'过滤原因':<12} {'数量':>8}")
                 print("-" * 35)
                 for code, reason, volume in sorted(filtered_current_codes):
@@ -358,7 +430,7 @@ class QMTAPI:
         return differences
     
     def _convert_jq_code_to_qmt(self, jq_code: str) -> str:
-        """将聚宽代码转换为QMT代码
+        """将聚宽代码转换为MiniQMT代码
         511260.XSHG -> 511260.SH
         511260.XSHE -> 511260.SZ
         """
@@ -371,12 +443,6 @@ class QMTAPI:
         elif market == 'XSHE':
             return f"{code}.SZ"
         return jq_code
-    
-    def _convert_qmt_position_to_full_code(self, code: str, market: str) -> str:
-        """将持仓代码和市场转换为完整QMT代码
-        code: 600000, market: SH -> 600000.SH
-        """
-        return f"{code}.{market}"
     
     def _get_pure_code(self, full_code: str) -> str:
         """从完整代码中获取纯数字代码
@@ -401,48 +467,61 @@ class QMTAPI:
         """
         return 3 if self._is_fund(code) else 2
 
-    def _place_order(self, code: str, volume: int, direction: str, retry = 0):
-        """执行QMT实际下单"""
-
-        # 使用完整QMT代码获取行情
-        # 使用完整QMT代码获取行情
+    def _place_order(self, code: str, volume: int, direction: str, retry=0):
+        """执行MiniQMT实际下单"""
         try:
-            tick_data_dict = self.C.get_full_tick([code])
-            if not tick_data_dict or code not in tick_data_dict:
-                print(f"获取 {code} 行情数据失败, tick_data_dict={tick_data_dict}")
+            # 获取行情数据
+            tick_data = xtdata.get_full_tick([code])
+            if not tick_data or code not in tick_data:
+                print(f"获取 {code} 行情数据失败, tick_data={tick_data}")
                 return
             
-            tick_data = tick_data_dict[code]
-            if not tick_data or 'lastPrice' not in tick_data or tick_data['lastPrice'] <= 0:
-                print(f"获取 {code} 最新价失败, tick_data={tick_data}")
+            current_tick = tick_data[code]
+            if not current_tick or 'lastPrice' not in current_tick or current_tick['lastPrice'] <= 0:
+                print(f"获取 {code} 最新价失败, tick_data={current_tick}")
                 return
             
-            price = tick_data['lastPrice']
+            price = current_tick['lastPrice']
             # 获取买卖二价，如果没有第二档价格则使用0
-            ask_price2 = tick_data['askPrice'][1] if ('askPrice' in tick_data and len(tick_data['askPrice']) > 1) else 0
-            bid_price2 = tick_data['bidPrice'][1] if ('bidPrice' in tick_data and len(tick_data['bidPrice']) > 1) else 0
+            ask_price2 = current_tick['askPrice'][1] if ('askPrice' in current_tick and len(current_tick['askPrice']) > 1) else 0
+            bid_price2 = current_tick['bidPrice'][1] if ('bidPrice' in current_tick and len(current_tick['bidPrice']) > 1) else 0
             
         except Exception as e:
             print(f"获取 {code} 行情异常: {str(e)}")
             return
-        # 从完整代码中提取纯代码
-        pure_code = self._get_pure_code(code)
-        data = self.C.get_instrumentdetail(code)
-        if data["InstrumentStatus"] > 0:
-            print(f"股票 {code} 停牌，无法下单")
-            return
-        if price == data["UpStopPrice"] and direction == 'buy':
-            print(f"股票 {code} 达到涨停价格，无法下买单")
-            return
-        if price == data["DownStopPrice"] and direction == 'sell':
-            print(f"股票 {code} 达到跌停价格，无法下卖单")
+        
+        try:
+            # 获取合约详细信息
+            instrument_detail = xtdata.get_instrument_detail(code)
+            if not instrument_detail:
+                print(f"获取 {code} 合约信息失败")
+                return
+            
+            # 检查停牌状态
+            if instrument_detail.get("InstrumentStatus", 0) > 0:
+                print(f"股票 {code} 停牌，无法下单")
+                return
+            
+            up_limit = instrument_detail.get("UpStopPrice", 0)
+            down_limit = instrument_detail.get("DownStopPrice", 0)
+            
+            if price == up_limit and direction == 'buy':
+                print(f"股票 {code} 达到涨停价格，无法下买单")
+                return
+            if price == down_limit and direction == 'sell':
+                print(f"股票 {code} 达到跌停价格，无法下卖单")
+                return
+                
+        except Exception as e:
+            print(f"获取 {code} 合约信息异常: {str(e)}")
             return
             
         # 获取价格精度
         precision = self._get_price_precision(code)
+        
         # 根据买卖方向设置价格偏移和操作类型
         if direction == 'buy':
-            calculated_price = min(round(price * 1.002, precision), data["UpStopPrice"])  # 买单价格加0.2%
+            calculated_price = min(round(price * 1.002, precision), up_limit)  # 买单价格加0.2%
             # 如果卖二价格有效且优于计算价格，使用卖二价格
             if ask_price2 > 0 and ask_price2 < calculated_price:
                 order_price = ask_price2
@@ -450,9 +529,9 @@ class QMTAPI:
             else:
                 order_price = calculated_price
                 print(f"使用计算价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
-            op_type = 23  # 买入
+            order_type = xtconstant.STOCK_BUY
         else:
-            calculated_price = max(round(price * 0.998, precision), data["DownStopPrice"])  # 卖单价格减0.2%
+            calculated_price = max(round(price * 0.998, precision), down_limit)  # 卖单价格减0.2%
             # 如果买二价格有效且优于计算价格，使用买二价格
             if bid_price2 > 0 and bid_price2 > calculated_price:
                 order_price = bid_price2
@@ -460,58 +539,68 @@ class QMTAPI:
             else:
                 order_price = calculated_price
                 print(f"使用计算价格下单: {order_price}, 计算价格:{calculated_price}, 最新价格:{price}, 出价精度:{precision}")
-            op_type = 24  # 卖出
+            order_type = xtconstant.STOCK_SELL
+        
         # 如果是买入单，检查资金是否足够
         if direction == 'buy':
-            # 获取账户资金信息
-            account_info = get_trade_detail_data(g.account, 'STOCK', 'ACCOUNT')
-            if not account_info:
-                print(f"获取账户资金信息失败，无法下买单: {code}")
+            try:
+                account = StockAccount(self.account_id)
+                account_info = self.trader.query_stock_asset(account)
+                if not account_info:
+                    print(f"获取账户资金信息失败，无法下买单: {code}")
+                    return
+                
+                # 计算所需资金（股票价格 + 佣金）
+                stock_cost = order_price * volume  # 股票成本
+                commission_rate = 0.0001  # 佣金万分之一
+                commission = max(stock_cost * commission_rate, 5.0)  # 佣金最低5元
+                total_cost = stock_cost + commission  # 总成本
+                
+                # 获取可用资金
+                available_cash = account_info.cash
+                
+                if available_cash < total_cost:
+                    print(f"资金不足，无法下买单: {code}")
+                    print(f"  所需资金: {total_cost:.2f} 元 (股票: {stock_cost:.2f}, 佣金: {commission:.2f})")
+                    print(f"  可用资金: {available_cash:.2f} 元")
+                    print(f"  资金缺口: {total_cost - available_cash:.2f} 元")
+                    return
+                
+                print(f"资金检查通过: 所需 {total_cost:.2f} 元，可用 {available_cash:.2f} 元")
+                
+            except Exception as e:
+                print(f"检查资金异常: {str(e)}")
                 return
-            
-            # 计算所需资金（股票价格 + 佣金）
-            stock_cost = order_price * volume  # 股票成本
-            commission_rate = 0.0001  # 佣金万分之一
-            commission = max(stock_cost * commission_rate, 5.0)  # 佣金最低5元
-            total_cost = stock_cost + commission  # 总成本
-            
-            # 获取可用资金
-            available_cash = account_info[0].m_dAvailable if account_info else 0
-            
-            if available_cash < total_cost:
-                print(f"资金不足，无法下买单: {code}")
-                print(f"  所需资金: {total_cost:.2f} 元 (股票: {stock_cost:.2f}, 佣金: {commission:.2f})")
-                print(f"  可用资金: {available_cash:.2f} 元")
-                print(f"  资金缺口: {total_cost - available_cash:.2f} 元")
-                return
-            
-            print(f"资金检查通过: 所需 {total_cost:.2f} 元，可用 {available_cash:.2f} 元")
         
-        user_order_id = f"{retry}_{datetime.now()}"
         # 执行下单
-        passorder(
-            op_type,                # 操作类型：1买入，2卖出
-            1101,                   # 组合方式
-            g.account,              # 资金账号
-            code,                   # 股票代码
-            11,                     # 报价类型：限价单
-            order_price,            # 委托价格
-            volume,                 # 下单数量
-            g.strategy_name,        # 策略名称
-            2,                      # 快速下单标记
-            user_order_id,          # 投资备注
-            self.C                  # 策略上下文
-        )
-        
-        print(f'下单成功: {code}, {"买入" if direction == "buy" else "卖出"}, {volume} 股, 价格 {order_price}')
+        try:
+            account = StockAccount(self.account_id)
+            order_id = self.trader.order_stock(
+                account=account,
+                stock_code=code,
+                order_type=order_type,
+                order_volume=volume,
+                price_type=xtconstant.FIX_PRICE,
+                price=order_price,
+                strategy_name=g.strategy_name,
+                order_remark=f"{retry}_{datetime.now()}"
+            )
             
+            if order_id > 0:
+                print(f'下单成功: {code}, {"买入" if direction == "buy" else "卖出"}, {volume} 股, 价格 {order_price}, 订单号: {order_id}')
+            else:
+                print(f'下单失败: {code}, 错误码: {order_id}')
+                
+        except Exception as e:
+            print(f'下单异常: {code}, {str(e)}')
+
 
 # 全局变量存储调度任务
 scheduled_tasks = {}
 task_counter = 0
 
 # 全局定时器回调函数
-def global_timer_callback(ContextInfo):
+def global_timer_callback():
     """全局定时器回调函数，检查所有待执行的任务"""
     current_time = datetime.now()
     tasks_to_remove = []
@@ -530,7 +619,7 @@ def global_timer_callback(ContextInfo):
                 scheduled_tasks[task_id]['executed'] = True
             
             try:
-                task_info['func'](ContextInfo)
+                task_info['func']()
             except Exception as e:
                 print(f"执行调度任务时发生错误: {e}")
             finally:
@@ -541,26 +630,8 @@ def global_timer_callback(ContextInfo):
         if task_id in scheduled_tasks:
             del scheduled_tasks[task_id]
 
-def schedule_run(ContextInfo, func, target_time):
-    """
-    调度函数在指定时间执行
-    优先使用原生的 ContextInfo.schedule_run，如果不存在则使用自定义实现
-    
-    参数:
-    ContextInfo: 策略上下文对象
-    func: 要调度的函数
-    target_time: 目标执行时间 (datetime对象)
-    """
-    # 检查是否存在原生的 schedule_run 方法
-    if hasattr(ContextInfo, 'schedule_run') and callable(getattr(ContextInfo, 'schedule_run')):
-        # 使用原生的 schedule_run 方法
-        try:
-            return ContextInfo.schedule_run(func, target_time)
-        except Exception as e:
-            print(f"使用原生 schedule_run 失败，切换到自定义实现: {e}")
-            # 如果原生方法失败，继续使用自定义实现
-    
-    # 使用自定义实现
+def schedule_run(func, target_time):
+    """调度函数在指定时间执行"""
     global task_counter
     task_counter += 1
     task_id = f"task_{task_counter}"
@@ -571,12 +642,6 @@ def schedule_run(ContextInfo, func, target_time):
         'target_time': target_time,
         'executed': False
     }
-    
-    # 如果这是第一个任务，启动全局定时器
-    if len(scheduled_tasks) == 1:
-        # 使用100毫秒间隔检查任务，提高精度
-        start_time = (datetime.now() - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
-        ContextInfo.run_time('global_timer_callback', '100nMilliSecond', start_time)
     
     return task_id
 
@@ -590,7 +655,8 @@ def cancel_scheduled_task(task_id):
 DEBUG = False
 
 # 修改原有的adjust函数
-def adjust(ContextInfo):
+def adjust():
+    """主要的调整函数"""
     now = datetime.now()
     current_time = now.time()
     is_trading_time = (
@@ -601,8 +667,8 @@ def adjust(ContextInfo):
     
     if is_trading_time or DEBUG:
         # 在交易时间内，执行同步操作
-        api = QMTAPI(ContextInfo, g.strategy_names)
-        api.sync_positions(g.account)
+        if g.trader:
+            g.trader.sync_positions()
         # 安排下一次运行
         next_run = now + timedelta(seconds=g.sync_positions_interval)
     else:
@@ -612,10 +678,12 @@ def adjust(ContextInfo):
         )
     
     # 安排下一次运行
-    schedule_run(ContextInfo, adjust, next_run)
+    schedule_run(adjust, next_run)
 
-def init(ContextInfo):
-    g.account = account
+def init(account_id: str):
+    """初始化函数"""
+    g.account_id = account_id
+    g.trader = MiniQMTAPI(account_id, g.strategy_names)
     print(f"!!!!当前监控策略:{g.strategy_names}")
     
     # 初始化latest_update_time为当天的0点
@@ -633,4 +701,34 @@ def init(ContextInfo):
     print(f"初始化latest_update_time为{g.latest_update_time}, 之前更新的策略将不同步，如果需要同步请注释掉此行")
 
     # 设置调度，从first_run开始运行
-    schedule_run(ContextInfo, adjust, g.first_run)
+    schedule_run(adjust, g.first_run)
+    
+    # 启动定时器检查任务
+    import threading
+    def timer_loop():
+        while True:
+            global_timer_callback()
+            time.sleep(0.1)  # 100毫秒检查一次
+    
+    timer_thread = threading.Thread(target=timer_loop, daemon=True)
+    timer_thread.start()
+
+# 主运行函数
+def run():
+    """主运行函数，保持程序运行"""
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("程序退出")
+        if g.trader and g.trader.trader:
+            g.trader.trader.stop()
+
+# 使用示例
+if __name__ == "__main__":
+    # 初始化，传入你的资金账号
+    account_id = "your_account_id_here"  # 替换为实际的资金账号
+    init(account_id)
+    
+    # 运行程序
+    run()
