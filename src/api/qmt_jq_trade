@@ -185,7 +185,7 @@ class QMTAPI:
             direction = "买入" if order.m_nOffsetFlag == 48 else "卖出"
             print(f"{order.m_strOrderSysID:<12} {order.m_strInstrumentID:<10} "
                   f"{order.m_strInstrumentName[:8]:<8} {direction:<6} "
-                  f"{order.m_nEntrustType:<8} {order.m_nVolumeTotalOriginal:>8} {order.m_nVolumeTraded:>8} "
+                  f"{order.m_eEntrustType:<8} {order.m_nVolumeTotalOriginal:>8} {order.m_nVolumeTraded:>8} "
                   f"{order.m_dLimitPrice:>8.2f} {order.m_nOrderStatus:>6} "
                   f"{order.m_strRemark[:20]:<20}")
         if not orders:
